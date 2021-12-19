@@ -10,7 +10,7 @@ Useful:
 - to automate usage of https://otr.datenkeller.net, e.g. to program recordings of your favorite shows :)
 - because it provides much better filtering than the website!
 
-Tested on MacOS and Linux
+Tested on MacOS and Linux.
 
 Dependencies
 ------------
