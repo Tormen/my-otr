@@ -2,15 +2,15 @@
 my-otr Shell Script
 ===================
 
-The missing command-line tool for https://otr.datenkeller.net!
+The missing command-line tool for otr.datenkeller.net!
 
 Finally! :)
 
 Useful:
-- to automate usage of https://otr.datenkeller.net, e.g. to program recordings of your favorite shows :)
+- to automate usage of otr.datenkeller.net, e.g. to program recordings of your favorite shows :)
 - because it provides much better filtering than the website!
 
-Tested on MacOS and Linux.
+Tested on MacOS and Linux
 
 Dependencies
 ------------
@@ -42,15 +42,15 @@ Usage
     usage: my-otr/my-otr [OPTIONS] <COMMAND> [[PARAM] [..]]
     
     OPTIONS:
-      -C  | --conf [FILE]  If FILE is provided: Use FILE as config file (instead of '/Users/me/.my-otr.conf').
+      -C  | --conf [FILE]  If FILE is provided: Use FILE as config file (instead of '~/.my-otr.conf').
                            If called WITHOUT FILE this will print the DEFAULT CONFIG.
                            You can use this to create your default config file:
-                             my-otr --conf > "/Users/me/.my-otr.conf"
+                             my-otr --conf > "~/.my-otr.conf"
       -D  | --debug        Turn DBG output ON.
       -DD | --deep-debug   Turn DBG output ON; also for subcommands called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
       -Q  | --quiet        Turn verbose output OFF.
-      -l  | --log          Do log to LOGFILE '/var/log/mine/my-otr.log'.
-      -L  | --no-log       Prevent logging to LOGFILE '/var/log/mine/my-otr.log'.
+      -l  | --log          Do log to LOGFILE '~/.my-otr.log'.
+      -L  | --no-log       Prevent logging to LOGFILE '~/.my-otr.log'.
       -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
     
     COMMAND can be:
