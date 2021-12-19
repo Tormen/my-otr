@@ -21,8 +21,10 @@ DEEPDBG=""
 FORCE=""
 DATENKELLER_LOGIN="..."
 DATENKELLER_PASSW="..."
+OTR_LOGIN="..."
+OTR_PASSW="..."
 COOKIE_FILE="/tmp/my-otr___cookies.txt"
-LOGFILE=~/.my-otr.log;
+LOGFILE=~/".my-otr.log";
 LOG="1"
 OTR_SEARCH_LIMIT="9999";
 OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
@@ -148,6 +150,13 @@ SOME DEFAULT VALUES FROM CONFIG FILE:
   DBG     = '$DBG' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --debug above)
   DEEPDBG = '$DEEPDBG' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --deep-debug above)
   FORCE   = '$FORCE' <<< if FORCE is set (so != ''), then by default this script will FORCE some things (see --force above)
+
+EXAMPLES:
+  # Search all Bares fuer Rares given on channel 'zdf', aired on or after 2020-02-28 and only shows given at exactly 15h05:
+  my-otr search \"bares fuer rares\" @zdf \">2020-02-28\" @15:05
+
+  # Simply download ALL available Bares fuer Rares and decode them (but starting with the OLDEST -- hence the 'tac'):
+  my-otr search "bares fuer rares"|tac|my-otr get
 "
   exit 0
 }
@@ -604,15 +613,6 @@ for i in 0 1 2 3 4 5 6 7 8 9; do trap "cleanup \"TRAP\" $i;" $i; done;
 
 [ $# -eq 0 ] && usage
 
-# FIND OUR_AWK_SCRIPT:
-if [ -z "$OUR_AWK_SCRIPT" ]; then
-  for a in ./my-otr.awk ~/.my-otr.awk; do
-    [ -s "$a" ] && OUR_AWK_SCRIPT="$a"
-  done
-fi
-[ -z "$OUR_AWK_SCRIPT" ] && err 063 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
-[ -s "$OUR_AWK_SCRIPT" ] || err 064 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
-
 # for datenkeller_search(): (used in the otr search-page)
 FILTER_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
 FILTER_TITLE="";
@@ -729,6 +729,15 @@ case "$CMD" in
 esac
 
 ### DO IT / DOIT:
+
+# FIND OUR_AWK_SCRIPT:
+if [ -z "$OUR_AWK_SCRIPT" ]; then
+  for a in ./my-otr.awk ~/.my-otr.awk; do
+    [ -s "$a" ] && OUR_AWK_SCRIPT="$a"
+  done
+fi
+[ -z "$OUR_AWK_SCRIPT" ] && err 063 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
+[ -s "$OUR_AWK_SCRIPT" ] || err 064 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
 
 case "$CMD" in
   "login") datenkeller_login;;
