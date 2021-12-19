@@ -2,12 +2,12 @@
 my-otr Shell Script
 ===================
 
-The missing command-line tool for otr.datenkeller.net!
+The missing command-line tool for https://otr.datenkeller.net!
 
 Finally! :)
 
 Useful:
-- to automate usage of otr.datenkeller.net, e.g. to program recordings of your favorite shows :)
+- to automate usage of https://otr.datenkeller.net, e.g. to program recordings of your favorite shows :)
 - because it provides much better filtering than the website!
 
 Tested on MacOS and Linux
