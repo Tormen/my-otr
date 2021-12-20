@@ -1,10 +1,12 @@
 #!/bin/sh
 
-# 066 == highest used errCode
+# 067 == highest used errCode
 
 US_CALL="$(echo "'$0'" "$@")";
 
 US=${0##*/};   # get filename without path
+
+NOW="$( date +"%Y-%m-%d_%H%M.%S")"
 
 #########################################################
 
@@ -182,11 +184,10 @@ EXAMPLES:
 }
 
 err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
-  local outp="$$| ERROR $errCode [$exitCode]: $msg"
-  echo "
-$outp" 1>&2
-  [ $LOG_REDIRECTED ] && echo "
-$outp" 1>&4
+  local outp="$$| ERROR $errCode [$exitCode]: $msg${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\", catch the output in file${NL}  2.) Make sure that your user account data is NOT visible in there${NL}  3.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  4.) Be PATIENT and I will /try/ come back to you!${NL}"
+
+  echo "${NL}$outp" 1>&2
+  [ $LOG_REDIRECTED ] && echo "${NL}$outp" 1>&4
   exit $exitCode;
 }
 
@@ -559,8 +560,9 @@ duplicate_check() { local decoded_filename="$1";
 
 datenkeller_get() {
   [ $VRB ] && echo "$$| >>> Downloading otr.datenkeller.net URLs (starting with '/?getFile='). Reading from stdin!"
-  while read line; do
-    [ $DBG ] && echo "$$|  ~  read line='$line'"
+  total_cnt=0; duplicate_skip_cnt=0; download_cnt=0;
+  while read line; do     total_cnt="$(( $total_cnt + 1 ))"
+    [ $DBG ] && echo "$$|  ~  read line #$total_cnt: '$line'"
     case "$line" in
       '/?getFile='*)                        url="$line";;
       20[0-9][0-9]-[0][1-9]-[0-3][0-9]"	"*) url="$(echo "$line"|cut -f 8)";;
@@ -576,7 +578,8 @@ datenkeller_get() {
     [ $DBG ] && echo "$$|  ~  datenkeller_get(): CALLING duplicate_check '$decoded_filename'..."
     duplicate_check "$decoded_filename"; rc=$?; # returns 1 if DUPLICATE was found !
     case "$rc" in
-       1) [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on decoded_filename: YES, we have a duplicate! -->> SKIPPING!"
+       1) duplicate_skip_cnt="$(( $duplicate_skip_cnt + 1 ))";
+          [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on decoded_filename: YES, we have a duplicate! -->> SKIPPING ($duplicate_skip_cnt. time)!"
           continue;;
        0) [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on decoded_filename: NO duplicate -->> so we can download now :)";;
        *) err 044;;
@@ -590,13 +593,16 @@ datenkeller_get() {
       case "$awk_outp" in
         "DBG:"*) echo "$$|  ~  [awk] $awk_outp";;
         *) #[ $DBG ] && echo "$$|  ~  datenkeller_dl \"$awk_outp\""
-           datenkeller_dl "$awk_outp" || err 033;;
+           datenkeller_dl "$awk_outp" || err 033
+           download_cnt="$(( $download_cnt + 1 ))";;
       esac
     done << EOL || err 032
 $(awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" "$TEMPFILE" get)
 EOL
   done
+  [ $(( $download_cnt + $duplicate_skip_cnt )) -eq $total_cnt ] || err 067 "We read '$total_cnt' lines from stdin. Skipped '$duplicate_skip_cnt' lines. Downloaded '$download_cnt' lines. This should ADD UP (total = skipped + downloaded), but it does not!" 
   [ $DBG ] && echo "$$|  ~  Done."
+  [ $QUIET ] || echo "$$| >>> DONE (successfully processed $total_cnt lines read from stdin: $duplicate_skip_cnt skipped, $download_cnt downloaded)" 
 }
 
 
@@ -749,7 +755,7 @@ redirectToLOG
 if [ $LOG ]; then
   echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
   echo "$$|____________________________________________________________";
-  echo "$$|$( date +"%Y-%m-%d_%H%M.%S") :: RUNNING [pid=$$] $US_CALL";
+  echo "$$|$NOW :: RUNNING [pid=$$] $US_CALL";
   echo "$$|"
 fi
 
