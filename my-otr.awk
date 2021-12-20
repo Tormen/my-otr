@@ -130,7 +130,7 @@ function do_search() {
     case "var cellTextSendung": expected_state(2); title=extract_str($2, "title"); break;
     case "var cellTextDatum":   expected_state(2); date=extract_str($2, "date"); break;
 
-    case "var cellTextDauer":   expected_state(2); duration=extract_str($2, "duration"); break;
+    case "var cellTextDauer":   expected_state(2); duration=extract_str($2, "duration")+0; break;
 
     case "cellFormatLink":      expected_state(2);
       new_state(3, "title:'"title"' date:'"date"' duration:'"duration"'"); break;
@@ -153,20 +153,31 @@ function do_search() {
 
       timestamp_str = otr_date_to_str(date);
       if (timestamp_str == "") err(1025);
-      if (DBG) printf(DBGPFX"TIME='%s' len(ALLOWED_TIMES_ARR)='%d' ALLOWED_TIMES_ARR[TIME]='%s' --> '%s'\n", TIME, length(ALLOWED_TIMES_ARR), ALLOWED_TIMES_ARR[TIME], (TIME in ALLOWED_TIMES_ARR) )
-      if (length(ALLOWED_TIMES_ARR) > 0 && ALLOWED_TIMES_ARR[TIME] != 1) { new_state(0, "Time '" TIME "' (from '" timestamp_str "') not within requested range!"); break; }
-      if (DBG) printf(DBGPFX"WEEKDAY='%s' len(ALLOWED_WEEKDAYS_ARR)='%d' ALLOWED_WEEKDAYS_ARR[WEEKDAY]='%s' --> '%s'\n", WEEKDAY, length(ALLOWED_WEEKDAYS_ARR), ALLOWED_WEEKDAYS_ARR[tolower(WEEKDAY)], (tolower(WEEKDAY) in ALLOWED_WEEKDAYS_ARR) )
-      if (length(ALLOWED_WEEKDAYS_ARR) > 0 && ALLOWED_WEEKDAYS_ARR[tolower(WEEKDAY)] != 1) { new_state(0, "Weekday '" WEEKDAY "' (from '" timestamp_str "') not within requested range!"); break; }
+      # IMPORTANT: Through simple lookup associative array in awk GROWS ! (but value is '' ;)) --> len(..) grows !
+      #            But as we only start the lookup if the length was > 0 to begin with, it's OK !
+      if (length(ALLOWED_TIMES_ARR) > 0 && ALLOWED_TIMES_ARR[TIME] != 1) {
+        if (DBG) printf(DBGPFX"TIME='%s' len(ALLOWED_TIMES_ARR)='%d'(grows,IGNORE!) ALLOWED_TIMES_ARR[TIME]='%s' --> '%s'\n", TIME, length(ALLOWED_TIMES_ARR), ALLOWED_TIMES_ARR[TIME], (TIME in ALLOWED_TIMES_ARR) ) > "/dev/stderr";
+        new_state(0, "Time '" TIME "' (from '" timestamp_str "') not within requested range!"); break;
+      }
+
+      if (length(ALLOWED_DAYS_ARR) > 0 && ALLOWED_DAYS_ARR[tolower(DAY)] != 1) {
+        if (DBG) printf(DBGPFX"DAY='%s' len(ALLOWED_DAYS_ARR)='%d'(grows,IGNORE!) ALLOWED_DAYS_ARR[DAY]='%s' --> '%s'\n", tolower(DAY), length(ALLOWED_DAYS_ARR), ALLOWED_DAYS_ARR[tolower(DAY)], (tolower(DAY) in ALLOWED_DAYS_ARR) ) > "/dev/stderr";
+        new_state(0, "Weekday '" DAY "' (from '" timestamp_str "') not within requested range!"); break;
+      }
 
       if (date == "") err(1011)
 
       if (duration == "") err(1013)
-      if (DBG) printf(DBGPFX"duration='%s' len(ALLOWED_DURATIONS_ARR)='%d' ALLOWED_DURATIONS_ARR[duration]='%s' --> '%s'\n", duration, length(ALLOWED_DURATIONS_ARR), ALLOWED_DURATIONS_ARR[duration], (duration in ALLOWED_DURATIONS_ARR) )
-      if (length(ALLOWED_DURATIONS_ARR) > 0 && ALLOWED_DURATIONS_ARR[duration] != 1) { new_state(0, "Duration '" duration "' not within requested range!"); break; }
+      if (length(ALLOWED_DURATIONS_ARR) > 0 && ALLOWED_DURATIONS_ARR[duration] != 1) {
+        if (DBG) printf(DBGPFX"duration='%s' len(ALLOWED_DURATIONS_ARR)='%d'(grows,IGNORE!) ALLOWED_DURATIONS_ARR[duration]='%s' --> '%s'\n", duration, length(ALLOWED_DURATIONS_ARR), ALLOWED_DURATIONS_ARR[duration], (duration in ALLOWED_DURATIONS_ARR) ) > "/dev/stderr";
+        new_state(0, "Duration '" duration "' not within requested range!"); break;
+      }
 
       if (sender == "") err(1012)
-      if (DBG) printf(DBGPFX"sender/channel='%s' len(ALLOWED_CHANNELS_ARR)='%d' ALLOWED_CHANNELS_ARR[sender]='%s' --> '%s'\n", sender, length(ALLOWED_CHANNELS_ARR), ALLOWED_CHANNELS_ARR[sender], (sender in ALLOWED_CHANNELS_ARR) )
-      if (length(ALLOWED_CHANNELS_ARR) > 0 && ALLOWED_CHANNELS_ARR[sender] != 1) { new_state(0, "sender/chanel '" sender "' not within requested range!"); break; }
+      if (length(ALLOWED_CHANNELS_ARR) > 0 && ALLOWED_CHANNELS_ARR[sender] != 1) { 
+        if (DBG) printf(DBGPFX"sender/channel='%s' len(ALLOWED_CHANNELS_ARR)='%d'(grows,IGNORE!) ALLOWED_CHANNELS_ARR[sender]='%s' --> '%s'\n", sender, length(ALLOWED_CHANNELS_ARR), ALLOWED_CHANNELS_ARR[sender], (sender in ALLOWED_CHANNELS_ARR) ) > "/dev/stderr";
+        new_state(0, "sender/chanel '" sender "' not within requested range!"); break;
+      }
 
       if (title == "") err(1014)
 
@@ -224,17 +235,18 @@ function do_get() {
 
 
 function set_ALLOWED_DURATIONS_ARR() {
-  if (FILTER_DURATION_TIL == "") {
-    if (FILTER_DURATION_FROM == "") return;
-    else _til=999; 
+  _from=""; _til="";
+  if (TIL_DURATION == "") {
+    if (FROM_DURATION == "") return;
+    else { _til=999; _from=FROM_DURATION + 0; }
   } else {
-    _til=FILTER_DURATION_TIL + 0;
-    if (FILTER_DURATION_FROM == "") _from=0;
-    else _from=FILTER_DURATION_FROM + 0;
+    _til=TIL_DURATION + 0;
+    if (FROM_DURATION == "") _from=0;
+    else _from=FROM_DURATION + 0;
   }
+  if (DBG) printf(DBGPFX" set_ALLOWED_DURATIONS_ARR(): _from: '%s', _til: '%s'\n", _from, _til) > "/dev/stderr";
   if (_from > _til) err(1028, "FILTER_DURATION_FROM() _from '" _from "' > '" _til " _til ?!");
-  if (! _from <= _til) err(1029, "FILTER_DURATION_FROM() _from '" _from "' NOT <= '" _til " _til ?!");
-  if (DBG) printf(DBGPFX" set_ALLOWED_DURATIONS_ARR(): _from: '%s', _til: '%s'\n", _from, _til);
+  if (! (_from <= _til)) err(1029, "FILTER_DURATION_FROM() _from '" _from "' NOT <= '" _til "' _til ?!");
   for (_dd = _from; _dd <= _til; _dd++) ALLOWED_DURATIONS_ARR[_dd] = 1;
 }
 
@@ -295,42 +307,51 @@ BEGIN {
   if (WHAT != "search") {
   # WHAT != "search":
 
-    if (DESCR != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE DESCR '%s'.\n", DESCR) > "/dev/stderr"; 
+    if (CHANNELS != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE CHANNELS '%s'.\n", CHANNELS) > "/dev/stderr";
 
-    if (DURATIONS != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE DURATIONS '%s'.\n", DURATIONS) > "/dev/stderr"; 
-    if (FROM_DURATION != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE FROM_DURATION '%s'.\n", FROM_DURATION) > "/dev/stderr"; 
-    if (TIL_DURATION != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE TIL_DURATION '%s'.\n", TIL_DURATION) > "/dev/stderr"; 
+    if (DESCR != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE DESCR '%s'.\n", DESCR) > "/dev/stderr";
 
-    if (TIMES != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE TIMES '%s'.\n", TIMES) > "/dev/stderr"; 
-    if (FROM_TIME != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE FROM_TIME '%s'.\n", FROM_TIME) > "/dev/stderr"; 
-    if (TIL_TIME != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE TIL_TIME '%s'.\n", TIL_TIME) > "/dev/stderr"; 
+    if (DURATIONS != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE DURATIONS '%s'.\n", DURATIONS) > "/dev/stderr";
+    if (FROM_DURATION != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE FROM_DURATION '%s'.\n", FROM_DURATION) > "/dev/stderr";
+    if (TIL_DURATION != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE TIL_DURATION '%s'.\n", TIL_DURATION) > "/dev/stderr";
 
-    if (WEEKDAYS != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE WEEKDAYS '%s'.\n", WEEKDAYS) > "/dev/stderr"; 
+    if (TIMES != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE TIMES '%s'.\n", TIMES) > "/dev/stderr";
+    if (FROM_TIME != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE FROM_TIME '%s'.\n", FROM_TIME) > "/dev/stderr";
+    if (TIL_TIME != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE TIL_TIME '%s'.\n", TIL_TIME) > "/dev/stderr";
 
-  } else { 
+    if (DAYS != "") if (DBG) printf(DBGPFX"<COMMAND> is NOT 'search' --> Will IGNORE DAYS '%s'.\n", DAYS) > "/dev/stderr";
+
+  } else {
   # WHAT == "search":
 
+    split("",ALLOWED_CHANNELS_ARR);
     if (CHANNELS != "") {
-      split(tolower(CHANNELS),ALLOWED_CHANNELS_ARR,/[	]/);
+      split(tolower(CHANNELS),_tmp_arr,/[	]/); #if (DBG) printf(DBGPFX"_tmp_arr = [%s]\n%s<<<<<<<<<<<<<<", length(_tmp_arr), sprint_arr( _tmp_arr)) > "/dev/stderr";
+      for (_i in _tmp_arr) { ALLOWED_CHANNELS_ARR[ _tmp_arr[_i] ] = 1; }
       if (DBG) printf(DBGPFX"Will search %s CHANNELS '%s'.\n", length(ALLOWED_CHANNELS_ARR), CHANNELS) > "/dev/stderr";
-    } else split("",ALLOWED_CHANNELS_ARR);
+    }
     if (DBG) printf(DBGPFX"ALLOWED_CHANNELS_ARR() = \n%s<<<<<<<<<<<\n", sprint_arr( ALLOWED_CHANNELS_ARR )) > "/dev/stderr";
 
     if (DESCR != "") if (DBG) printf(DBGPFX"Will search for DESCRIPTION '%s'.\n", DESCR) > "/dev/stderr";
 
+    split("", ALLOWED_DURATIONS_ARR);
     if (DURATIONS != "") {
-      split(tolower(DURATIONS),ALLOWED_DURATIONS_ARR,/[ ]/);
+      split(tolower(DURATIONS),_tmp_arr,/[ ]/); #if (DBG) printf(DBGPFX"_tmp_arr = [%s]\n%s<<<<<<<<<<<<<<", length(_tmp_arr), sprint_arr( _tmp_arr)) > "/dev/stderr";
+      for (_i in _tmp_arr) { ALLOWED_DURATIONS_ARR[_tmp_arr[_i]+0]=1; } # <<< ensure that we store only NUMBERS ! ( + 0 forces awk to type it as int ! )
       if (DBG) printf(DBGPFX"Will search for %s DURATIONS '%s'.\n", length(ALLOWED_DURATIONS_ARR), DURATIONS) > "/dev/stderr";
-    } else split("", ALLOWED_DURATIONS_ARR);
+    }
     if (FROM_DURATION != "") if (DBG) printf(DBGPFX"Will search for FROM_DURATION '%s'.\n", FROM_DURATION) > "/dev/stderr";
     if (TIL_DURATION != "") if (DBG) printf(DBGPFX"Will search for TIL_DURATION '%s'.\n", TIL_DURATION) > "/dev/stderr";
     set_ALLOWED_DURATIONS_ARR()
     if (DBG) printf(DBGPFX"ALLOWED_DURATIONS_ARR() = \n%s<<<<<<<<<<<\n", sprint_arr( ALLOWED_DURATIONS_ARR )) > "/dev/stderr";
 
+    split("", ALLOWED_TIMES_ARR);
     if (TIMES != "") {
-      split(tolower(TIMES),ALLOWED_TIMES_ARR,/[ ]/);
+      if (DBG) printf(DBGPFX"TIMES = '%s'\n", TIMES) > "/dev/stderr";
+      split(tolower(TIMES),_tmp_arr,/[ ]/); #if (DBG) printf(DBGPFX"_tmp_arr = [%s]\n%s<<<<<<<<<<<<<<", length(_tmp_arr), sprint_arr( _tmp_arr)) > "/dev/stderr";
+      for (_i in _tmp_arr) { split_time(_tmp_arr[_i]); ALLOWED_TIMES_ARR[ sprintf("%02d%02d", SPLIT_TIME_H, SPLIT_TIME_M) ] = 1; }
       if (DBG) printf(DBGPFX"Will search for %s TIMES '%s'.\n", length(ALLOWED_TIMES_ARR), TIMES) > "/dev/stderr";
-    } else split("", ALLOWED_TIMES_ARR);
+    }
     if (FROM_TIME != "") {
       split_time(FROM_TIME);
       FROM_TIME_H = SPLIT_TIME_H; FROM_TIME_M = SPLIT_TIME_M;
@@ -344,11 +365,13 @@ BEGIN {
     set_ALLOWED_TIMES_ARR()
     if (DBG) printf(DBGPFX"ALLOWED_TIMES_ARR() = \n%s<<<<<<<<<<<\n", sprint_arr( ALLOWED_TIMES_ARR )) > "/dev/stderr";
 
-    if (WEEKDAYS != "") {
-      split(tolower(WEEKDAYS),ALLOWED_WEEKDAYS_ARR,/[ ]/);
-      if (DBG) printf(DBGPFX"Will search %s WEEKDAYS '%s'.\n", length(ALLOWED_WEEKDAYS_ARR), WEEKDAYS) > "/dev/stderr";
-    } else split("",ALLOWED_WEEKDAYS_ARR);
-    if (DBG) printf(DBGPFX"ALLOWED_WEEKDAYS_ARR() = \n%s<<<<<<<<<<<\n", sprint_arr( ALLOWED_WEEKDAYS_ARR )) > "/dev/stderr";
+    split("",ALLOWED_DAYS_ARR);
+    if (DAYS != "") {
+      split(tolower(DAYS),_tmp_arr,/[ ]/); #if (DBG) printf(DBGPFX"_tmp_arr = [%s]\n%s<<<<<<<<<<<<<<", length(_tmp_arr), sprint_arr( _tmp_arr)) > "/dev/stderr";
+      for (_i in _tmp_arr) { ALLOWED_DAYS_ARR[ _tmp_arr[_i] ] = 1; }
+      if (DBG) printf(DBGPFX"Will search %s DAYS '%s'.\n", length(ALLOWED_DAYS_ARR), DAYS) > "/dev/stderr";
+    }
+    if (DBG) printf(DBGPFX"ALLOWED_DAYS_ARR() = \n%s<<<<<<<<<<<\n", sprint_arr( ALLOWED_DAYS_ARR )) > "/dev/stderr";
   }
 
   DBGPFX=DBGPFX_DEFAULT"MAIN-LOOP| "

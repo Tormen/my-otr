@@ -15,7 +15,7 @@ CURL_OPTS="--silent --show-error";
 ##########################################################
 #### CONF DEFAULT VALUES:
 
-VRB=1;
+VRB=;
 DBG=;
 DEEPDBG=""
 FORCE=""
@@ -45,7 +45,7 @@ LOG_REDIRECTED=; # flag to keep track if we already redirected log --> to know i
 ### har-to-curl /dl/otr.datenkeller.net.har|less
 
 EXAMPLE_CONF='
-# Commented lines show the DEFAULT VALUES; feel free to adapt.
+# Commented lines of VARIABLES below show the DEFAULT VALUES; feel free to adapt.
 
 # Only set this if you want to store my-otr.awk NOT in the same directory as my-otr and NOT in ~/.my-otr.awk:
 OUR_AWK_SCRIPT=""
@@ -56,11 +56,11 @@ DATENKELLER_PASSW="<YOUR https://otr.datenkeller.net PASSWORD>"
 OTR_LOGIN="<YOUR https://www.onlinetvrecorder.com LOGIN>"
 OTR_PASSW="<YOUR https://www.onlinetvrecorder.com PASSWORD>"
 
-# Turn on VERBOSE output by default (to turn off set VRB="";)
-#VRB=1;
-# Turn off DEBUG output by default (to turn on set DBG=1;)
+# Turn off VERBOSE output by default (to turn on set VRB="1")
+#VRB=;
+# Turn off DEBUG output by default (to turn on set DBG=1)
 #DBG=;
-# Turn off DEEP-DEBUG output by default (to turn on set DEEPDBG=1;)
+# Turn off DEEP-DEBUG output by default (to turn on set DEEPDBG=1)
 # This will then include printing DEBUG output for subcommands called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()!
 #DEEPDBG=""
 # By default do NOT force things (to force everything (e.g. relogin even though cookie found, redownload even though target file already found) by default set FORCE=1;)
@@ -101,9 +101,10 @@ OPTIONS:
                        If called WITHOUT FILE this will print the DEFAULT CONFIG.
                        You can use this to create your default config file:
                          $US --conf > \"$DEFAULT_CONF_FILE\"
-  -D  | --debug        Turn DBG output ON.
-  -DD | --deep-debug   Turn DBG output ON; also for subcommands called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
-  -Q  | --quiet        Turn verbose output OFF.
+  -V  | --verbose      Turn VERBOSE output ON.
+  -D  | --debug        Turn DEBUG output ON.
+  -DD | --deep-debug   Turn DEBUG for subcommands ON called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
+                       Independent of regular debug output (--debug).
   -l  | --log          Do log to LOGFILE '$LOGFILE'.
   -L  | --no-log       Prevent logging to LOGFILE '$LOGFILE'.
   -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
@@ -161,7 +162,7 @@ EXAMPLES:
   exit 0
 }
 
-err() { local errCode="$1"; [ -z "$2" ] && local msg="Pleas55555." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
+err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
   local outp="$$| ERROR $errCode [$exitCode]: $msg"
   echo "
 $outp" 1>&2
@@ -380,13 +381,13 @@ echo "-d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDAT
 # -H 'Content-Length: 482' 
 curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E" https://otr.datenkeller.net/index.php|tr ";" "\n" >"$TEMPFILE" || err 025
 
-  [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+  [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
   if [ $LOG ]; then
     # redirect stdout to '3' (the backup of the real stdout), stderr will go to LOG.
-    tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v WEEKDAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 026 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search --> rc='$?'"
+    tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 026 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search --> rc='$?'"
     echo "$tmp" 1>&3 || err 057
   else
-    awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v WEEKDAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search || err 052 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+    awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search || err 052 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
   fi
 
   [ $DBG ] && echo "$$|  ~  Done."
@@ -594,7 +595,7 @@ state=0; for arg in "$@"; do
         -L|--no-log) LOG=""; continue;;
         -D|--debug) DBG=1; continue;;
         -DD|--deep-debug) DEEPDBG=1; continue;;
-        -Q|--quiet) VRB=; continue;;
+        -V|--verbose) VRB=1; continue;;
         -F|--force) FORCE=1; continue;;
       esac;;
     1) [ -z "$arg" ] && echo "$EXAMPLE_CONF" && exit 0; CONF_FILE="$arg"; state=0;;
@@ -636,7 +637,7 @@ while [ $# -gt 0 ]; do
   arg="$1"; shift;
   [ $DBG ] && echo "DBG: CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
   [ -z "$ignore_params" ] && case "$arg" in
-    -C|--conf|-l|--log|-L|--no-log|-D|--debug|-DD|--deep-debug|-Q|--quiet|-F|--force) continue;; # IGNORE here as already detected above !
+    -C|--conf|-l|--log|-L|--no-log|-D|--debug|-DD|--deep-debug|-V|--verbose|-F|--force) continue;; # IGNORE here as already detected above !
     --) ignore_params=1; continue;;
     --search|--login|--get|--help) [ -n "$CMD" ] && err 055 "Only 1 CMD allowed. Call --help."; CMD="$( rmStart '--' "$arg" )"; continue;;
     search|login|get) [ -n "$CMD" ] && err 060 "Only 1 CMD allowed. Call --help."; CMD="$arg"; continue;;
@@ -655,17 +656,17 @@ while [ $# -gt 0 ]; do
           FILTER_FROM_DATE="$( rmStart '>' "$arg" )"; continue;;
 
     @[0-9][0-9][h:-][0-9][0-9])
-          FILTER_TIMES="$( append "$(rmStart '@' "$arg"|tr 'h-' ':' )" "$FILTER_TIMES" )"; continue;;
+          FILTER_TIMES="$( append "$(rmStart '@' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
     @[0-9][0-9]:)
-          FILTER_TIMES="$( append "$(echo "$arg"|sed 's/\([@].*\):/\1/' )" "$FILTER_TIMES" )"; continue;;
+          FILTER_TIMES="$( append "$(echo "$arg"|sed 's/\([@].*\):/\1/' )" to "$FILTER_TIMES" )"; continue;;
     "<"[0-9][0-9]:)
-          FILTER_TIL_TIME="$( append "$(echo "$arg"|sed 's/\([<].*\):/\1/' )" "$FILTER_TIMES" )"; continue;;
+          FILTER_TIL_TIME="$( append "$(echo "$arg"|sed 's/\([<].*\):/\1/' )" to "$FILTER_TIMES" )"; continue;;
     ">"[0-9][0-9]:)
-          FILTER_FROM_TIME="$( append "$(echo "$arg"|sed 's/\([>].*\):/\1/' )" "$FILTER_TIMES" )"; continue;;
+          FILTER_FROM_TIME="$( append "$(echo "$arg"|sed 's/\([>].*\):/\1/' )" to "$FILTER_TIMES" )"; continue;;
     "<"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_TIL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" "$FILTER_TIMES" )"; continue;;
+          FILTER_TIL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
     ">"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_FROM_TIME="$( append "$(rmStart '>' "$arg"|tr 'h-' ':' )" "$FILTER_TIMES" )"; continue;;
+          FILTER_FROM_TIME="$( append "$(rmStart '>' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
 
     @[Mm][oO][nN]|@[Tt][Uu][eE]|@[Ww][Ee][Nn]|@[Tt][Hh][Uu]|@[Ff][Rr][Ii]|@[Ss][Aa][Tt]|@[Ss][Uu][Nn])
           FILTER_WEEKDAYS="$( append "$( rmStart '@' "$arg" )" to "$FILTER_WEEKDAYS" )"; continue;;
@@ -679,14 +680,14 @@ while [ $# -gt 0 ]; do
           [ -n "$FILTER_FROM_DURATION" ] && err 058 "Only 1 >{duration} filter allowed. Call --help.";
           FILTER_FROM_DURATION="$( rmStart '>' "$arg" )"; continue;;
 
-    @*)   
-          if [ -z "$FILTER_CHANNEL" ]; then FILTER_CHANNEL="$( rmStart '@' "$arg" )"; continue          # collect FIRST @channel provided HERE !
-          else [ "$FILTER_CHANNEL" != "-" ] && FILTER_CHANNELS="$FILTER_CHANNEL" && FILTER_CHANNEL="-"; # switch from using FILTER_CHANNEL to FILTER_CHANNELS!
-               FILTER_CHANNELS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_CHANNELS" "	")"; fi;;   # collect any further @channel provided HERE; sep by TAB!
+    @*)
+          if [ -z "$FILTER_CHANNEL" ]; then FILTER_CHANNEL="$( rmStart '@' "$arg" )";                            # collect FIRST @channel provided HERE !
+          else [ "$FILTER_CHANNEL" != "-" ] && FILTER_CHANNELS="$FILTER_CHANNEL" && FILTER_CHANNEL="-";          # switch from using FILTER_CHANNEL to FILTER_CHANNELS!
+               FILTER_CHANNELS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_CHANNELS" "	")"; fi; continue;;  # collect any further @channel provided HERE; sep by TAB!
 
     ,)    [ $state -eq 2 ] && err 051 "Only 1 parameter ',' allowed (to separate description from title). Call --help.";
           [ $state -ne 1 ] && err 056
-          state=2; continu:we;;
+          state=2; continue;;
   esac
 
   # depending on state we collect all remaining args (without further controls) to the dedicated variables:
@@ -708,7 +709,7 @@ redirectToLOG
 [ $LOG ] && echo "$$|"
 
 WD="$(pwd)"
-[ $DBG ] && echo "$$|  >  Working directory: '$WD'"
+[ $DBG ] && echo "$$|  ~  Working directory: '$WD'"
 
 [ -z "$COOKIE_FILE" ] && err 012
 [ -z "$DATENKELLER_LOGIN" ] && err 013
@@ -738,6 +739,7 @@ if [ -z "$OUR_AWK_SCRIPT" ]; then
 fi
 [ -z "$OUR_AWK_SCRIPT" ] && err 063 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
 [ -s "$OUR_AWK_SCRIPT" ] || err 064 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
+[ $DBG ] && echo "$$|  ~  Using OUR_AWK_SCRIPT = '$OUR_AWK_SCRIPT'"
 
 case "$CMD" in
   "login") datenkeller_login;;
