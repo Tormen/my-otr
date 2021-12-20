@@ -417,7 +417,8 @@ datenkeller_dl() { local url="$1";
   ### DO THE DOWNLOAD:
   [ -x "$OTR_DL_CMD" ] || err 003 "'$OTR_DL_CMD' not found."
   [ $VRB ] && echo "$$|  >  Downloading '$url'...";
-  $OTR_DL_CMD $OTR_DL_CMD_PARAMS "$awk_outp" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$awk_outp\""
+  [ $DBG ] && echo "$$|  ~  \"$OTR_DL_CMD\" $OTR_DL_CMD_PARAMS \"$awk_outp\""
+  "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$awk_outp" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$awk_outp\""
   [ -s "$otrkey_filename" ] || err 035
 
   [ $DO_OTR_DECODE_AFTER_DL ] || return 0
@@ -425,7 +426,7 @@ datenkeller_dl() { local url="$1";
   ### DO THE DECODING:
   [ $VRB ] && echo "$$|  >  Decoding to '$decoded_filename'...";
   decode_one_file "$otrkey_filename" "." || err 036
-  [ -s "$decoded_filename" ] || err 037
+  [ -s "$decoded_filename" ] || err 037 "Decoded filename '$decoded_filename' should be non-empty file. But it's not. Please check."
 
   return 0
 }
