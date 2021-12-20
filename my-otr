@@ -1,6 +1,8 @@
 #!/bin/sh
 
-# 062 == highest used errCode
+# 066 == highest used errCode
+
+US_CALL="$(echo "'$0'" "$@")";
 
 US=${0##*/};   # get filename without path
 
@@ -15,9 +17,10 @@ CURL_OPTS="--silent --show-error";
 ##########################################################
 #### CONF DEFAULT VALUES:
 
-VRB=;
-DBG=;
-DEEPDBG=""
+QUIET=;    # regular status output (independent of VRB output and DBG output and DEPDBG)
+VRB=;      # VERBOSE output (independent of 'regular status output' and DBG output and DEPDBG)
+DBG=;      # DEBUG   output (independent of 'regular status output' and VRB output and DEEPDBG)
+DEEPDBG="" # DEBUG OUTPUT of subcommands (independent of 'regular status output' and VRB output and DBG)
 FORCE=""
 DATENKELLER_LOGIN="..."
 DATENKELLER_PASSW="..."
@@ -56,14 +59,27 @@ DATENKELLER_PASSW="<YOUR https://otr.datenkeller.net PASSWORD>"
 OTR_LOGIN="<YOUR https://www.onlinetvrecorder.com LOGIN>"
 OTR_PASSW="<YOUR https://www.onlinetvrecorder.com PASSWORD>"
 
+# Regular status output (independent of VRB output and DBG output and DEPDBG)
+# Do NOT suppress "regular status output" (to do suppress, set QUIET=1)
+#QUIET="";
+
+# VERBOSE output (independent of "regular status output" and DBG output and DEPDBG)
 # Turn off VERBOSE output by default (to turn on set VRB="1")
 #VRB=;
+
+# DEBUG   output (independent of "regular status output" and VRB output and DEEPDBG)
 # Turn off DEBUG output by default (to turn on set DBG=1)
 #DBG=;
+
+# DEBUG OUTPUT of subcommands (independent of "regular status output" and VRB output and DBG)
 # Turn off DEEP-DEBUG output by default (to turn on set DEEPDBG=1)
 # This will then include printing DEBUG output for subcommands called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()!
 #DEEPDBG=""
-# By default do NOT force things (to force everything (e.g. relogin even though cookie found, redownload even though target file already found) by default set FORCE=1;)
+
+# By default do NOT force things (to force everything by default set FORCE=1;)
+# The decisions influenced by this are:
+#   * relogin even though cookie found
+#   * redownload even though target file already found 
 #FORCE=""
 
 #DEFAULT_DECODE_OUTP_DIR=~"/Movies";
@@ -101,12 +117,14 @@ OPTIONS:
                        If called WITHOUT FILE this will print the DEFAULT CONFIG.
                        You can use this to create your default config file:
                          $US --conf > \"$DEFAULT_CONF_FILE\"
+  -Q  | --quiet        Supress any regular status output of the script (search results will still be printed). Independent of VERBOSE and DEBUG !
   -V  | --verbose      Turn VERBOSE output ON.
   -D  | --debug        Turn DEBUG output ON.
   -DD | --deep-debug   Turn DEBUG for subcommands ON called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
                        Independent of regular debug output (--debug).
-  -l  | --log          Do log to LOGFILE '$LOGFILE'.
+  -l  | --log          Turn LOGGING of any output (verbose, debug, deep-debug) ON. Logs to LOGFILE '$LOGFILE' by default.
   -L  | --no-log       Prevent logging to LOGFILE '$LOGFILE'.
+  --log-file FILE      Set LOGFILE to FILE.
   -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
 
 COMMAND can be:
@@ -146,6 +164,7 @@ COMMAND can be:
 Uses CONFIG FILE '$CONF_FILE'. You can change location with --conf parameter!
 
 SOME DEFAULT VALUES FROM CONFIG FILE:
+  QUIET   = '$QUIET' <<< if QUIET is set (so != ''), then by default this script will supress any regular status output (search results will still be printed) 
   LOG     = '$LOG' <<< if LOG is set (so != ''), then by default this script will redirect all output to this LOGFILE '$LOGFILE'! (see --no-log above)
   VRB     = '$VRB' <<< if VRB is set (so != ''), then by default this script will print VERBOSE output (see --verbose above)
   DBG     = '$DBG' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --debug above)
@@ -181,9 +200,17 @@ cleanup() { local rc=$?;
 
 redirectToLOG() {
   [ -z "$LOG" ] && return;
+
+  if [ -n "$FORCED_LOGFILE" ]; then
+    [ $DBG ] && echo "$$| ~~~ Using LOGFILE provided by --log-file parameter '$FORCED_LOGFILE'!"
+    LOGFILE="$FORCED_LOGFILE";
+  fi
+
   [ -z "$LOGFILE" ] && return;
+
   [ -n "$MAX_NR_OF_LOGFILES_TO_KEEP" ] && LOGFILE="$LOGFILE.$( date +"%Y-%m-%d_%H%M.%S" )"
-  [ $DBG ] && echo "$$|  >  Redirectring stdout+stderr now to LOGFILE '$LOGFILE'!
+
+  [ $DBG ] && echo "$$| ~~~ Redirectring stdout+stderr now to LOGFILE '$LOGFILE'!
 less \"$LOGFILE\"
 "
   touch "$LOGFILE" || { rc=$?; m="FAILED [$rc] accessing logfile '$LOGFILE'."; logger -t mine "#$US: $m"; err 009 "$m"; }
@@ -283,10 +310,13 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
   #[ $DEEPDBG ] && echo "$$| ///////////////////////////////////////////////////////////";
   [ $DEEPDBG ] && echo "$$|>>>> $cmd"
   if [ $DEEPDBG ]; then
-    eval "$cmd" 2>&1|sed -e "s/^/$$|         /"; rc=$?;
+    [ $DBG] && echo "$$|  ~  Decoding '$INP_FILE': eval '$cmd' 2>&1";
+    outp="$(eval "$cmd" 2>&1)"; rc=$?;
   else
-    eval "$cmd" >/dev/null 2>&1|sed -e "s/^/$$|         /"; rc=$?;
+    [ $DBG] && echo "$$|  ~  Decoding '$INP_FILE': eval '$cmd' >/dev/null 2>&1";
+    outp="$(eval "$cmd" >/dev/null 2>&1)"; rc=$?;
   fi
+  [ -n "$outp" ] && echo "$outp"|sed -e "s/^/$$|         /";
 
   # && echo DONE || echo \"F A I L E D [$?]!!\"
   if [ $rc -eq 0 ]; then
@@ -416,7 +446,7 @@ datenkeller_dl() { local url="$1";
 
   ### DO THE DOWNLOAD:
   [ -x "$OTR_DL_CMD" ] || err 003 "'$OTR_DL_CMD' not found."
-  [ $VRB ] && echo "$$|  >  Downloading '$url'...";
+  [ $QUIET ] || echo "$$| >>> Downloading '$url'...";
   [ $DBG ] && echo "$$|  ~  \"$OTR_DL_CMD\" $OTR_DL_CMD_PARAMS \"$awk_outp\""
   "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$awk_outp" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$awk_outp\""
   [ -s "$otrkey_filename" ] || err 035
@@ -424,6 +454,7 @@ datenkeller_dl() { local url="$1";
   [ $DO_OTR_DECODE_AFTER_DL ] || return 0
 
   ### DO THE DECODING:
+  [ $QUIET ] || echo "$$|  >  Decoding '$otrkey_filename'...";
   [ $VRB ] && echo "$$|  >  Decoding to '$decoded_filename'...";
   decode_one_file "$otrkey_filename" "." || err 036
   [ -s "$decoded_filename" ] || err 037 "Decoded filename '$decoded_filename' should be non-empty file. But it's not. Please check."
@@ -587,22 +618,31 @@ get_xjxr() { r=$RANDOM; [ -z "$r" ] && r=0; date +"%s$(printf "%03d" "$(( $r % 1
 #########################################################
 #### MAIN:
 
+FORCED_CONF_FILE=""
+FORCED_LOGFILE=""
 state=0; for arg in "$@"; do
   case "$state" in
-    0) [ $DBG ] && echo "DBG: PRE CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
+    0) [ $DBG ] && echo "$$|  ~  PRE CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
       case "$arg" in
-        -C|--conf) state=1; continue;;
-        -l|--log) LOG="1"; continue;;
+        -C|--conf) state=1; continue;; # COLLECT CONF_FILE if provided
+        -l|--log) LOG="1"; continue;; 
+        --log-file) state=2; continue;; # COLLECT FORCED_LOGFILE
         -L|--no-log) LOG=""; continue;;
+        -Q|--quiet) QUIET=1; continue;;
+        -V|--verbose) VRB=1; continue;;
         -D|--debug) DBG=1; continue;;
         -DD|--deep-debug) DEEPDBG=1; continue;;
-        -V|--verbose) VRB=1; continue;;
         -F|--force) FORCE=1; continue;;
       esac;;
-    1) [ -z "$arg" ] && echo "$EXAMPLE_CONF" && exit 0; CONF_FILE="$arg"; state=0;;
+    1) [ -z "$arg" ] && echo "$EXAMPLE_CONF" && exit 0; FORCED_CONF_FILE="$arg"; state=0;;
+    2) [ -z "$arg" ] && err 066; FORCED_LOGFILE="$arg"; state=0;;
     *) err 065;;
   esac
 done
+if [ -n "$FORCED_CONF_FILE" ]; then
+  [ $DBG ] && echo "$$| ~~~ Using CONF_FILE provided via --conf parameter '$FORCED_CONF_FILE'!"
+  CONF_FILE="$FORCED_CONF_FILE"
+fi
 [ "$state" = "1" ] && echo "$EXAMPLE_CONF" && exit 0; 
 [ -z "$CONF_FILE" ] && CONF_FILE="$DEFAULT_CONF_FILE";
 
@@ -636,9 +676,11 @@ CMD=""; ignore_params=""; state=1;
 
 while [ $# -gt 0 ]; do
   arg="$1"; shift;
-  [ $DBG ] && echo "DBG: CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
+  [ $DBG ] && echo "$$|  ~  CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
   [ -z "$ignore_params" ] && case "$arg" in
-    -C|--conf|-l|--log|-L|--no-log|-D|--debug|-DD|--deep-debug|-V|--verbose|-F|--force) continue;; # IGNORE here as already detected above !
+    -l|--log|-L|--no-log|-Q|--quiet|-V|--verbose|-D|--debug|-DD|--deep-debug|-F|--force) continue;; # IGNORE here as already detected above !
+    -C|--conf) [ -n "$FORCED_CONF_FILE" ] && shift; continue;; # also skip parameter of --conf !
+    --log-file) [ -n "$FORCED_LOGFILE" ] && shift; continue;;  # also skip parameter of --log-file !
     --) ignore_params=1; continue;;
     --search|--login|--get|--help) [ -n "$CMD" ] && err 055 "Only 1 CMD allowed. Call --help."; CMD="$( rmStart '--' "$arg" )"; continue;;
     search|login|get) [ -n "$CMD" ] && err 060 "Only 1 CMD allowed. Call --help."; CMD="$arg"; continue;;
@@ -704,10 +746,12 @@ done
 [ "$CMD" = "help" ] && usage;
 
 redirectToLOG
-[ $LOG ] && echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
-[ $LOG ] && echo "$$|____________________________________________________________";
-[ $LOG ] && echo "$$|$( date +"%Y-%m-%d_%H%M.%S") :: RUNNING [pid=$$] '$0'";
-[ $LOG ] && echo "$$|"
+if [ $LOG ]; then
+  echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+  echo "$$|____________________________________________________________";
+  echo "$$|$( date +"%Y-%m-%d_%H%M.%S") :: RUNNING [pid=$$] $US_CALL";
+  echo "$$|"
+fi
 
 WD="$(pwd)"
 [ $DBG ] && echo "$$|  ~  Working directory: '$WD'"

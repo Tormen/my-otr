@@ -46,12 +46,14 @@ Usage
                            If called WITHOUT FILE this will print the DEFAULT CONFIG.
                            You can use this to create your default config file:
                              my-otr --conf > "~/.my-otr.conf"
+      -Q  | --quiet        Supress any regular status output of the script (search results will still be printed). Independent of VERBOSE and DEBUG !
       -V  | --verbose      Turn VERBOSE output ON.
       -D  | --debug        Turn DEBUG output ON.
       -DD | --deep-debug   Turn DEBUG for subcommands ON called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
                            Independent of regular debug output (--debug).
-      -l  | --log          Do log to LOGFILE '~/.my-otr.log'.
+      -l  | --log          Turn LOGGING of any output (verbose, debug, deep-debug) ON. Logs to LOGFILE '~/.my-otr.log' by default.
       -L  | --no-log       Prevent logging to LOGFILE '~/.my-otr.log'.
+      --log-file FILE      Set LOGFILE to FILE.
       -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
     
     COMMAND can be:
