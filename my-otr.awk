@@ -22,7 +22,7 @@ function err(errnr, errmsg, exitcode) {
   if (exitcode == "") exitcode = 1; regex="^"DBGPFX_DEFAULT; sub(regex, "", errmsg);
   if (length(FILENAME) > 0) { tmp1=sprintf("'%s' @ %d ", FILENAME, FNR); tmp2=sprintf("\nvim +%s '%s'\n", FNR, FILENAME); }
   ERRCODE=sprintf("%04d",errnr);
-  printf("\nERROR #%s %s%s\n%s\n", ERRCODE, tmp1, errmsg, tmp2) > "/dev/stderr";
+  printf("\nERROR #%s in \"%s\" %s%s\n%s\n", ERRCODE, US, tmp1, errmsg, tmp2) > "/dev/stderr";
   exit exitcode;
 }
 
@@ -281,6 +281,8 @@ function set_ALLOWED_TIMES_ARR() {
 ### INIT:
 BEGIN {
   FS="=";
+
+  US="my-otr.awk"
 
   DBGPFX_DEFAULT="DBG: "
   DBGPFX=DBGPFX_DEFAULT"BEGIN| "

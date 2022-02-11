@@ -31,6 +31,7 @@ OTR_PASSW="..."
 COOKIE_FILE="/tmp/my-otr___cookies.txt"
 LOGFILE=~/".my-otr.log";
 LOG="1"
+LOG_ERR_TO_SYSLOG="1";
 OTR_SEARCH_LIMIT="9999";
 OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
 OTR_DL_CMD="aria2c"
@@ -98,6 +99,8 @@ get_decode_cmd() { # can use global variables: OTR_LOGIN, OTR_PASSW, OUTP_DIR, I
 #LOGFILE=~/.my-otr.log;
 # Turn on logging by default (to turn off set LOG=""):
 #LOG=1;
+# All ERRORs will be logged to syslog/journal (using tag "'$US'"):
+#LOG_ERR_TO_SYSLOG="1";
 
 # Usually do NOT touch this! - Set search limit. If you decrease this and get more results then the script will only treat the FIRST results page !
 #OTR_SEARCH_LIMIT="9999";
@@ -132,10 +135,11 @@ OPTIONS:
 COMMAND can be:
   [--]help     shows this usage information
 
-  [--]decode   <OTRFILE> [<OTRFILE> [..]] [<OUTPUT-DIR> defaults to $DEFAULT_OUTP_DIR]
+  [--]decode   <OTRFILE> [<OTRFILE> [..]] [<OUTPUT-DIR> defaults to $DEFAULT_DECODE_OUTP_DIR]
                <OTRFILE> can be '-', then the OTRFILE(s) are read from stdin !
                The script will stop decoding and quit on errors.
                <OUTPUT-DIR> needs to be a directory that exists.
+               This command is by default SILENT. Use --verbose to see decoded filenames.
 
   [--]login    <<< will NOT re-loging if cookie file found; except if FORCE is used <<< #TODO# automatically re-login in case cookie is not valid anymore
 
@@ -149,9 +153,9 @@ COMMAND can be:
                        '>date' <<< search only for shows AFTER (or ON; so including) a given date; in format: 2021-11-24
                        '<date' <<< search only for shows UP TO (or ON; so including) a given date; in format: 2021-11-24
                        '@date' <<< search only for shows AT a given date; in format: 2021-11-24
-                       '@HH:' or '@HH:MM' <<< search only for shows STARTING AT the provided time
-                       '>HH:' or '>HH:MM' <<< search only for shows STARTING AFTER (or ON; so including) the provided time
-                       '<HH:' or '<HH:MM' <<< search only for shows STARTING BEFORE (or ON; so including) the provided time
+                       '@HH:' or '@HHh' or '@HH:MM' <<< e.g. \"@20h\" search only for shows STARTING AT the provided time
+                       '>HH:' or '>HHh' or '>HH:MM' <<< e.g. \">20h\" search only for shows STARTING AFTER (or ON; so including) the provided time
+                       '<HH:' or '<HHh' or '<HH:MM' <<< e.g. \"<20h\" search only for shows STARTING BEFORE (or ON; so including) the provided time
                        '@Mon' .. '@sun'  <<< search only for shows GIVEN AT CERTAIN WEEKDAY
                        '@DD' <<< search only for shows with a DURATION EQUAL the provided length in minutes
                        '<DD' <<< search only for shows with a DURATION LESS (or EQUAL; so including) the provided length in minutes
@@ -184,13 +188,22 @@ EXAMPLES:
 }
 
 err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
-  local outp="$$| ERROR $errCode [$exitCode]: $msg${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\", catch the output in file${NL}  2.) Make sure that your user account data is NOT visible in there${NL}  3.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  4.) Be PATIENT and I will /try/ come back to you!${NL}"
+  local outp="$$| ERROR $errCode [$exitCode]: $msg${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\"${NL}      and catch the output in file: \"--log --log-file my-otr.log\"${NL}  2.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  3.) Be PATIENT and I will /try/ come back to you!${NL}"
 
   echo "${NL}$outp" 1>&2
   [ $LOG_REDIRECTED ] && echo "${NL}$outp" 1>&4
+  [ $LOG_ERR_TO_SYSLOG ] && logger -t "$US" "$outp"
   exit $exitCode;
 }
 
+force_echo() { local msg="$1"
+  if [ $LOG ]; then
+    # redirect stdout to '3' (the backup of the real stdout), stderr will go to LOG.
+    echo "$msg" 1>&3
+  else
+    echo "$msg"
+  fi
+}
 
 cleanup() { local rc=$?;
   [ $CLEANUP_DONE ] && return;
@@ -293,6 +306,7 @@ datenkeller_login() {
 #See otrtool(1) for further information
 #
 decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + uppercase for get_decode_cmd() !
+  [ $DBG ] && echo "$$| ~~~ decode_one_file(): INP_FILE='$INP_FILE' OUTP_DIR='$OUTP_DIR'"
   if [ -z "$OUTP_DIR" ]; then OUTP_DIR="."
   else
     cd "$OUTP_DIR" || err 061;
@@ -305,25 +319,29 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
       INP_FILE="$tmp"
     fi
   fi
+  local filename=${INP_FILE##*/};     ## To get: filename (filename.tar.gz) (without path)
+  local basename="${filename%.*}";    ## To get: filename-without-LAST-suffix (filename.tar)
+  [ $DEEPDBG ] && echo "$$|   ~ decode_one_file(): INP_FILE without path and last suffix: '$basename'"
+  if [ -e "$OUTP_DIR/$basename" ]; then
+    [ $DEEPDBG ] && echo "$$|   ~ decode_one_file(): DECODE OUTPUT FILE '$OUTP_DIR/$basename' EXISTS! [FORCE='$FORCE']"
+    if [ -n "$FORCE" ]; then
+      [ $DBG ] && echo "$$|  ~  DECODE OUTPUT FILE '$OUTP_DIR/$basename' found, but you asked to '--force' --> OVERWRITING!..."
+      rm "$OUTP_DIR/$basename" || err 069 "FAILED [$?] to: rm '$OUTP_DIR/$basename'"
+    fi
+  fi
 
   cmd="$(get_decode_cmd)"
 
   #[ $DEEPDBG ] && echo "$$| ///////////////////////////////////////////////////////////";
   [ $DEEPDBG ] && echo "$$|>>>> $cmd"
-  if [ $DEEPDBG ]; then
-    [ $DBG] && echo "$$|  ~  Decoding '$INP_FILE': eval '$cmd' 2>&1";
-    outp="$(eval "$cmd" 2>&1)"; rc=$?;
-  else
-    [ $DBG] && echo "$$|  ~  Decoding '$INP_FILE': eval '$cmd' >/dev/null 2>&1";
-    outp="$(eval "$cmd" >/dev/null 2>&1)"; rc=$?;
-  fi
-  [ -n "$outp" ] && echo "$outp"|sed -e "s/^/$$|         /";
+  [ $DBG ] && echo "$$|  ~  Decoding '$INP_FILE': eval '$cmd' 2>&1";
+  outp="$(eval "$cmd" 2>&1)"; rc=$?;
 
-  # && echo DONE || echo \"F A I L E D [$?]!!\"
   if [ $rc -eq 0 ]; then
+    [ $DEEPDBG ] && [ -n "$outp" ] && echo "$outp"|sed -e "s/^/$$|         /";
     [ $DEEPDBG ] && printf "$$|>>>> SUCCESS. DECODED FILE WRITTEN TO: '$OUTP_DIR'\n"
   else
-    err 050 "FAILED [$rc] to decode."
+    err 050 "FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND:\n$(echo "$outp"|sed -e "s/^/$$|         /")"
     #[ $DEEPDBG ] && echo ">>> FAILED [$rc]."
   fi
 
@@ -333,7 +351,9 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
 
 
 otr_decode() {
-  [ -z "$OUTP_DIR" ] && OUTP_DIR="$DEFAULT_OUTP_DIR"
+  [ $DBG ] && echo "$$| ~~~ otr_decode(): OUTP_DIR='$OUTP_DIR', FILES='$FILES'"
+  [ -z "$OUTP_DIR" ] && OUTP_DIR="$DEFAULT_DECODE_OUTP_DIR" && force_echo "$$|>>>> Defaulting to OUTPUT DIR '$OUTP_DIR'! (from DEFAULT_DECODE_OUTP_DIR in config file)\n\nWaiting 3 seconds!    ---    Press CTRL+C to abort" && sleep 3
+  [ -z "$OUTP_DIR$DEFAULT_DECODE_OUTP_DIR" ] && err 066 "'decode' command, but NO <OUTPUT-DIR> specified\nAND no DEFAULT_DECODE_OUTP_DIR in config file '$CONF_FILE' set!"
 
   mkdir -p "$OUTP_DIR" || err 019 "mkdir -p \"$OUTP_DIR\""
   chown me:mine "$OUTP_DIR" || err 047 "chown me:mine \"$OUTP_DIR\""
@@ -341,12 +361,12 @@ otr_decode() {
 
   if [ "$FILES" = "-" ]; then
     while read a; do
-      [ $VRB ] && echo "$$|>>>> '$a':"
+      [ $VRB ] && echo "$$|>>>> '$a'"
       decode_one_file "$a" "$OUTP_DIR";
     done
   else
     while read a; do
-      [ $VRB ] && echo "$$|>>>> '$a':"
+      [ $VRB ] && echo "$$|>>>> '$a'"
       decode_one_file "$a" "$OUTP_DIR";
     done<<EOB
 $FILES
@@ -360,13 +380,13 @@ EOB
 
 # USES:
 # # for datenkeller_search(): (used in the otr search-page)
-# FILTER_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
+# FILTER_FIRST_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
 # FILTER_TITLE="";
 # FILTER_FROM_DATE="";
 # FILTER_TIL_DATE="";
 # 
 # # to filter AFTERWARDS on the results (via the awk script):
-# FILTER_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
+# FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
 # FILTER_DESCRIPTION="";
 # FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
 # FILTER_FROM_TIME="";
@@ -388,14 +408,14 @@ datenkeller_search() {
   # instantiate DEFAULT values used for search_str (hence the local new variable!):
   local xjxr="$( get_xjxr )";
   local filter_title=""; [ -n "$FILTER_TITLE" ] && filter_title="$FILTER_TITLE"
-  local filter_channel=""; [ -n "$FILTER_CHANNEL" ] && [ "$FILTER_CHANNEL" != "-" ] && filter_channel="$FILTER_CHANNEL"
+  local filter_channel=""; [ -n "$FILTER_FIRST_CHANNEL" ] && [ "$FILTER_FIRST_CHANNEL" != "-" ] && filter_channel="$FILTER_FIRST_CHANNEL"
   local filter_from_date=""; [ -n "$FILTER_FROM_DATE" ] && filter_from_date="$FILTER_FROM_DATE"
   local filter_til_date=""; [ -n "$FILTER_TIL_DATE" ] && filter_til_date="$FILTER_TIL_DATE"
   local search_str="$(python3 -c "import urllib.parse as ul;
 def f(x): return ul.quote_plus(x);
 print(f\"%22search%22%3A%22{f('$filter_title')}%22%2C%22sender%22%3A%22{f('$filter_channel')}%22%2C%22senderCountry%22%3Anull%2C%22datumVon%22%3A%22$filter_from_date%22%2C%22datumBis%22%3A%22$filter_til_date%22\");")"
 
-  [ $VRB ] && echo "$$| >>> Searching otr.datenkeller.net for \"$FILTER_TITLE\"$( [ -n "$FILTER_CHANNEL" ] && [ "$FILTER_CHANNEL" != "-" ] && echo ", @$FILTER_CHANNEL" )$( [ -n "$FILTER_FROM_DATE" ] && echo ", >=$FILTER_FROM_DATE" )$( [ -n "$FILTER_TIL_DATE" ] && echo ", <=$FILTER_TIL_DATE" )"
+  [ $VRB ] && echo "$$| >>> Searching otr.datenkeller.net for \"$FILTER_TITLE\"$( [ -n "$FILTER_FIRST_CHANNEL" ] && [ "$FILTER_FIRST_CHANNEL" != "-" ] && echo ", @$FILTER_FIRST_CHANNEL" )$( [ -n "$FILTER_FROM_DATE" ] && echo ", >=$FILTER_FROM_DATE" )$( [ -n "$FILTER_TIL_DATE" ] && echo ", <=$FILTER_TIL_DATE" )"
   [ $DBG ] && echo "$$|  ~  xjxr='$xjxr' (ms since epoch (seconds since epoch with random ms ;)))"
   [ $DBG ] && echo "$$|  ~  filter_title='$filter_title'"
   [ $DBG ] && echo "$$|  ~  filter_channel='$filter_channel'"
@@ -412,13 +432,13 @@ echo "-d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDAT
 # -H 'Content-Length: 482' 
 curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E" https://otr.datenkeller.net/index.php|tr ";" "\n" >"$TEMPFILE" || err 025
 
-  [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+  [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
   if [ $LOG ]; then
     # redirect stdout to '3' (the backup of the real stdout), stderr will go to LOG.
-    tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 026 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search --> rc='$?'"
+    tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 026 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search --> rc='$?'"
     echo "$tmp" 1>&3 || err 057
   else
-    awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search || err 052 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+    awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search || err 052 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
   fi
 
   [ $DBG ] && echo "$$|  ~  Done."
@@ -508,11 +528,11 @@ set_existing_files() { local decoded_filename="$1";
   [ $DBG ] && echo "$$|  ~  set_existing_files(): decoded_fileQUALITY = '$decoded_fileQUALITY'"
 
   [ $DBG ] && echo "$$|  ~  set_existing_files(): CALLING split_filename( \"$decoded_fileBASE\" )..."
-  split_filename="$( split_filenameBase "$decoded_fileBASE" )"
+  split_filename="$( split_filenameBase "$decoded_fileBASE" )" || err 068 "FAILED [$?] Calling split_filenameBase '$decoded_fileBASE'\n(error code != 0, make sure to explicitly return 0 when successful).";
   [ $DBG ] && echo "$$|  ~  set_existing_files(): split_filename( \"$decoded_fileBASE\" ): GOT '$split_filename'"
 
   [ $DBG ] && echo "$$|  ~  set_existing_files(): CALLING get_alternate_local_filenames( \"$decoded_fileBASE\" \"$decoded_fileQUALITY\" $split_filename)..."
-  additional_files="$(get_alternate_local_filenames "$decoded_fileBASE" "$decoded_fileQUALITY" $split_filename)" || err 042 "get_alternate_local_filenames(): FAILED (error code != 0, make sure to explicitly return 0 when successful).";
+  additional_files="$(get_alternate_local_filenames "$decoded_fileBASE" "$decoded_fileQUALITY" $split_filename)" || err 042 "FAILED [$?] Calling get_alternate_local_filenames '$decoded_fileBASE' '$decoded_fileQUALITY' '$split_filename'\n(error code != 0, make sure to explicitly return 0 when successful).";
   if [ $VRB ]; then [ -n "$additional_files" ] && printf "$$|  >  get_alternate_local_filenames():\n%s\n" "$(echo "$additional_files"|sed -e "s/^.*/$$|     |\"&\"/")";
   elif [ $DBG ]; then [ -z "$additional_files" ] && printf "$$|  ~  set_existing_files(): CALLING get_alternate_local_filenames( ... ): NO additional_files found!\n" || printf "$$|  ~  set_existing_files(): CALLING get_alternate_local_filenames( ... ): GOT additional_files:\n%s\n" "$(echo "$additional_files"|sed -e "s/^.*/$$|     |\"&\"/")";
   fi
@@ -608,7 +628,7 @@ EOL
 
 # usage: append <what> "to" <to_what> <separator>
 append() { local what="$1"; [ "$2" != "to" ] && err 062; local to_what="$3"; local separator="$4"; [ -z "$4" ] && separator=" ";
-           [ -z "$to_what" ] && to_what="$what" || to_what="$to_what$separator$what"; echo "$to_what"; }
+           [ -z "$to_what" ] && echo "$what" || echo "$to_what$separator$what"; }
 
 rmStart() { echo "$2"|sed -e "s/^$1//"; }
 
@@ -637,7 +657,7 @@ state=0; for arg in "$@"; do
         -Q|--quiet) QUIET=1; continue;;
         -V|--verbose) VRB=1; continue;;
         -D|--debug) DBG=1; continue;;
-        -DD|--deep-debug) DEEPDBG=1; continue;;
+        -DD|--deep-debug) DBG=1; DEEPDBG=1; continue;;
         -F|--force) FORCE=1; continue;;
       esac;;
     1) [ -z "$arg" ] && echo "$EXAMPLE_CONF" && exit 0; FORCED_CONF_FILE="$arg"; state=0;;
@@ -662,13 +682,13 @@ for i in 0 1 2 3 4 5 6 7 8 9; do trap "cleanup \"TRAP\" $i;" $i; done;
 [ $# -eq 0 ] && usage
 
 # for datenkeller_search(): (used in the otr search-page)
-FILTER_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
+FILTER_FIRST_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
 FILTER_TITLE="";
 FILTER_FROM_DATE="";
 FILTER_TIL_DATE="";
 
 # to filter AFTERWARDS on the results (via the awk script):
-FILTER_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
+FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
 FILTER_DESCRIPTION="";
 FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
 FILTER_FROM_TIME="";
@@ -682,7 +702,7 @@ CMD=""; ignore_params=""; state=1;
 
 while [ $# -gt 0 ]; do
   arg="$1"; shift;
-  [ $DBG ] && echo "$$|  ~  CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
+  [ $DBG ] && echo "$$|  ~  CLI-PARAM-LOOP: [\$#:$#] ignore_params = '$ignore_params'  state = '$state'   --   arg='$arg'"
   [ -z "$ignore_params" ] && case "$arg" in
     -l|--log|-L|--no-log|-Q|--quiet|-V|--verbose|-D|--debug|-DD|--deep-debug|-F|--force) continue;; # IGNORE here as already detected above !
     -C|--conf) [ -n "$FORCED_CONF_FILE" ] && shift; continue;; # also skip parameter of --conf !
@@ -706,16 +726,16 @@ while [ $# -gt 0 ]; do
 
     @[0-9][0-9][h:-][0-9][0-9])
           FILTER_TIMES="$( append "$(rmStart '@' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
-    @[0-9][0-9]:)
-          FILTER_TIMES="$( append "$(echo "$arg"|sed 's/\([@].*\):/\1/' )" to "$FILTER_TIMES" )"; continue;;
-    "<"[0-9][0-9]:)
-          FILTER_TIL_TIME="$( append "$(echo "$arg"|sed 's/\([<].*\):/\1/' )" to "$FILTER_TIMES" )"; continue;;
-    ">"[0-9][0-9]:)
-          FILTER_FROM_TIME="$( append "$(echo "$arg"|sed 's/\([>].*\):/\1/' )" to "$FILTER_TIMES" )"; continue;;
+    @[0-9][0-9][:h])
+          FILTER_TIMES="$( append "$(echo "$arg"|sed 's/[@]\(.*\)[:h]/\1/' )" to "$FILTER_TIMES" )"; continue;;
+    "<"[0-9][0-9][:h])
+          FILTER_TIL_TIME="$( append "$(echo "$arg"|sed 's/[<]\(.*\)[:h]/\1/' )" to "$FILTER_TIL_TIME" )"; continue;;
+    ">"[0-9][0-9][:h])
+          FILTER_FROM_TIME="$( append "$(echo "$arg"|sed 's/[>]\(.*\)[:h]/\1/' )" to "$FILTER_FROM_TIME" )"; continue;;
     "<"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_TIL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
+          FILTER_TIL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" to "$FILTER_TIL_TIME" )"; continue;;
     ">"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_FROM_TIME="$( append "$(rmStart '>' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
+          FILTER_FROM_TIME="$( append "$(rmStart '>' "$arg"|tr 'h-' ':' )" to "$FILTER_FROM_TIME" )"; continue;;
 
     @[Mm][oO][nN]|@[Tt][Uu][eE]|@[Ww][Ee][Nn]|@[Tt][Hh][Uu]|@[Ff][Rr][Ii]|@[Ss][Aa][Tt]|@[Ss][Uu][Nn])
           FILTER_WEEKDAYS="$( append "$( rmStart '@' "$arg" )" to "$FILTER_WEEKDAYS" )"; continue;;
@@ -730,9 +750,12 @@ while [ $# -gt 0 ]; do
           FILTER_FROM_DURATION="$( rmStart '>' "$arg" )"; continue;;
 
     @*)
-          if [ -z "$FILTER_CHANNEL" ]; then FILTER_CHANNEL="$( rmStart '@' "$arg" )";                            # collect FIRST @channel provided HERE !
-          else [ "$FILTER_CHANNEL" != "-" ] && FILTER_CHANNELS="$FILTER_CHANNEL" && FILTER_CHANNEL="-";          # switch from using FILTER_CHANNEL to FILTER_CHANNELS!
-               FILTER_CHANNELS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_CHANNELS" "	")"; fi; continue;;  # collect any further @channel provided HERE; sep by TAB!
+          # collect FIRST @channel provided HERE !
+          if [ -z "$FILTER_FIRST_CHANNEL" ]; then FILTER_FIRST_CHANNEL="$( rmStart '@' "$arg" )";  
+          # switch from using FILTER_FIRST_CHANNEL to FILTER_REMAINING_CHANNELS!
+          else [ "$FILTER_FIRST_CHANNEL" != "-" ] && FILTER_REMAINING_CHANNELS="$FILTER_FIRST_CHANNEL" && FILTER_FIRST_CHANNEL="-";
+               # collect any further @channel provided HERE; sep by TAB!
+               FILTER_REMAINING_CHANNELS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_REMAINING_CHANNELS" "	")"; fi; continue;;  
 
     ,)    [ $state -eq 2 ] && err 051 "Only 1 parameter ',' allowed (to separate description from title). Call --help.";
           [ $state -ne 1 ] && err 056
@@ -760,7 +783,26 @@ if [ $LOG ]; then
 fi
 
 WD="$(pwd)"
-[ $DBG ] && echo "$$|  ~  Working directory: '$WD'"
+if [ $DBG ]; then
+  echo "$$|  ~  Working directory: '$WD'"
+  echo "$$|  ~  FILTER_TITLE: '$FILTER_TITLE'"
+  echo "$$|  ~  FILTER_DESCRIPTION: '$FILTER_DESCRIPTION'"
+  echo "$$|  ~  FILTER_TIMES: '$FILTER_TIMES'"
+  echo "$$|  ~  FILTER_FROM_TIME: '$FILTER_FROM_TIME'"
+  echo "$$|  ~  FILTER_TIL_TIME: '$FILTER_TIL_TIME'"
+  echo "$$|  ~  FILTER_DATE: '$FILTER_DATE'"
+  echo "$$|  ~  FILTER_FROM_DATE: '$FILTER_FROM_DATE'"
+  echo "$$|  ~  FILTER_TIL_DATE: '$FILTER_TIL_DATE'"
+  echo "$$|  ~  FILTER_FIRST_CHANNEL: '$FILTER_FIRST_CHANNEL'"
+  echo "$$|  ~  FILTER_REMAINING_CHANNELS: '$FILTER_REMAINING_CHANNELS'"
+  echo "$$|  ~  FILTER_DURATIONS: '$FILTER_DURATIONS'"
+  echo "$$|  ~  FILTER_FROM_DURATION: '$FILTER_FROM_DURATION'"
+  echo "$$|  ~  FILTER_TIL_DURATION: '$FILTER_TIL_DURATION'"
+  echo "$$|  ~  FILTER_WEEKDAYS: '$FILTER_WEEKDAYS'"
+  echo "$$|  ~  LAST_FILE: '$LAST_FILE'"
+  echo "$$|  ~  FILES: '$FILES'"
+  echo "$$|  ~  CMD: '$CMD'"
+fi
 
 [ -z "$COOKIE_FILE" ] && err 012
 [ -z "$DATENKELLER_LOGIN" ] && err 013
@@ -773,10 +815,13 @@ if [ -n "$FILTER_DATE" ]; then
   FILTER_FROM_DATE="$FILTER_DATE" && FILTER_TIL_DATE="$FILTER_DATE"
 fi
 case "$CMD" in
-  "login"|"get"|"dl"|"decode") [ -n "$FILTER_TITLE" ] && err 016 "Invalid parameter '$FILTER_TITLE' for <COMMAND> '$CMD'. Call with --help.";;
-  "login"|"get"|"dl"|"decode") [ -n "$FILTER_DESCRIPTION" ] && err 002 "Invalid parameter '$FILTER_DESCRIPTION' for <COMMAND> '$CMD'. Call with --help.";;
+  "login"|"get"|"dl"|"decode") [ -n "$FILTER_TITLE" ] && err 016 "Invalid parameter '$FILTER_TITLE' for <COMMAND> '$CMD'. Call with --help.";
+                               [ -n "$FILTER_DESCRIPTION" ] && err 002 "Invalid parameter '$FILTER_DESCRIPTION' for <COMMAND> '$CMD'. Call with --help.";
+                               if [ "$CMD" = "decode" ]; then
+                                 # 1 file and no directory: [ "$LAST_FILE" = "$FILES" ] && err 007
+                                 if [ -d "$LAST_FILE" ] || [ "$LAST_FILE" = "." ]; then OUTP_DIR="$LAST_FILE" && FILES="$(echo "$FILES"|sed -e '$ d')" || err 005 "FAILED [$?] with sed (FILES='$FILES')"; fi;
+                               fi;;
   "search") [ -z "$FILTER_TITLE" ] && err 017 "No FILTER_TITLE parameter(s) provided, but <COMMAND> '$CMD' needs it. Call with --help.";;
-  "decode") [ "$LAST_FILE" = "$FILES" ] && err 007; if [ -d "$LAST_FILE" ]; then OUTP_DIR="$LAST_FILE" && FILES="$(echo "$FILES"|sed -i '$ d')" || err 005; fi;;
   *) err 018 "Invalid <COMMAND> '$CMD'. Please contact author of this script.";;
 esac
 

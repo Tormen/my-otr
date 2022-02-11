@@ -63,6 +63,7 @@ Usage
                    <OTRFILE> can be '-', then the OTRFILE(s) are read from stdin !
                    The script will stop decoding and quit on errors.
                    <OUTPUT-DIR> needs to be a directory that exists.
+                   This command is by default SILENT. Use --verbose to see decoded filenames.
     
       [--]login    <<< will NOT re-loging if cookie file found; except if FORCE is used <<< #TODO# automatically re-login in case cookie is not valid anymore
     
@@ -76,9 +77,9 @@ Usage
                            '>date' <<< search only for shows AFTER (or ON; so including) a given date; in format: 2021-11-24
                            '<date' <<< search only for shows UP TO (or ON; so including) a given date; in format: 2021-11-24
                            '@date' <<< search only for shows AT a given date; in format: 2021-11-24
-                           '@HH:' or '@HH:MM' <<< search only for shows STARTING AT the provided time
-                           '>HH:' or '>HH:MM' <<< search only for shows STARTING AFTER (or ON; so including) the provided time
-                           '<HH:' or '<HH:MM' <<< search only for shows STARTING BEFORE (or ON; so including) the provided time
+                           '@HH:' or '@HHh' or '@HH:MM' <<< e.g. "@20h" search only for shows STARTING AT the provided time
+                           '>HH:' or '>HHh' or '>HH:MM' <<< e.g. ">20h" search only for shows STARTING AFTER (or ON; so including) the provided time
+                           '<HH:' or '<HHh' or '<HH:MM' <<< e.g. "<20h" search only for shows STARTING BEFORE (or ON; so including) the provided time
                            '@Mon' .. '@sun'  <<< search only for shows GIVEN AT CERTAIN WEEKDAY
                            '@DD' <<< search only for shows with a DURATION EQUAL the provided length in minutes
                            '<DD' <<< search only for shows with a DURATION LESS (or EQUAL; so including) the provided length in minutes
