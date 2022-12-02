@@ -204,6 +204,7 @@ function do_search() {
   # cellFormatLink.setAttribute("target", "_blank")
   #cellFormatLink.appendChild(cellImgFormat)
   #cellFormat.appendChild(cellFormatLink)
+  return 0
 }
 
 
@@ -280,6 +281,7 @@ function set_ALLOWED_TIMES_ARR() {
 
 ### INIT:
 BEGIN {
+  #DBG=1;
   FS="=";
 
   US="my-otr.awk"
@@ -379,7 +381,7 @@ BEGIN {
   DBGPFX=DBGPFX_DEFAULT"MAIN-LOOP| "
 };
 {
-  #print("XXX") > "/dev/stderr";
+  if (DBG) printf(DBGPFX"START-OF-NEW-CYCLE:") > "/dev/stderr";
   # Ignore EMPTY lines:
   if ($1 == "") next;
 
@@ -395,6 +397,13 @@ BEGIN {
     case "get": do_get(); break;
     default: err(1021, "Invalid WHAT '" WHAT "'");
   }
-  #print("YYY") > "/dev/stderr";
+  if (DBG) printf(DBGPFX"END-OF-NEW-CYCLE:") > "/dev/stderr";
 }
-
+END{
+  DBGPFX=DBGPFX_DEFAULT"RESULT| "
+  if (DBG) printf(DBGPFX"done.") > "/dev/stderr"
+  printf ("") > "/dev/stderr" ### <<< without these 2 lines I got an return-code of 141 from awk !?!??!?!
+  close("/dev/stderr");       ### <<< without these 2 lines I got an return-code of 141 from awk !?!??!?!
+  #print ("exit 0") > "/dev/stderr"
+  exit 0
+}

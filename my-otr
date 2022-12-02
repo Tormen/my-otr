@@ -188,7 +188,8 @@ EXAMPLES:
 }
 
 err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
-  local outp="$$| ERROR $errCode [$exitCode]: $msg${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\"${NL}      and catch the output in file: \"--log --log-file my-otr.log\"${NL}  2.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  3.) Be PATIENT and I will /try/ come back to you!${NL}"
+NOW=""
+  local outp="$$| @$( date +"%Y-%m-%d_%H%M.%S") ERROR $errCode [$exitCode]: $msg${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\"${NL}      and catch the output in file: \"--log --log-file my-otr.log\"${NL}  2.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  3.) Be PATIENT and I will /try/ come back to you!${NL}"
 
   echo "${NL}$outp" 1>&2
   [ $LOG_REDIRECTED ] && echo "${NL}$outp" 1>&4
@@ -433,12 +434,13 @@ echo "-d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDAT
 curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E" https://otr.datenkeller.net/index.php|tr ";" "\n" >"$TEMPFILE" || err 025
 
   [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
-  if [ $LOG ]; then
+  if [ -n "$LOG" ]; then
     # redirect stdout to '3' (the backup of the real stdout), stderr will go to LOG.
     tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 026 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search --> rc='$?'"
     echo "$tmp" 1>&3 || err 057
   else
-    awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search || err 052 "Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+    tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 052 "awk returned [$?]. Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+   /usr/bin/printf "$tmp\n" || err 070 # use printf not echo to avoid "echo: write error: Broken pipe". SEE: https://superuser.com/questions/554855/how-can-i-fix-a-broken-pipe-error
   fi
 
   [ $DBG ] && echo "$$|  ~  Done."
@@ -647,8 +649,9 @@ get_xjxr() { r=$RANDOM; [ -z "$r" ] && r=0; date +"%s$(printf "%03d" "$(( $r % 1
 FORCED_CONF_FILE=""
 FORCED_LOGFILE=""
 state=0; for arg in "$@"; do
+#echo "arg='$arg'"
   case "$state" in
-    0) [ $DBG ] && echo "$$|  ~  PRE CLI-PARAM-LOOP: [\$#:$#] arg='$arg'"
+    0) [ $DBG ] && echo "$$|  ~  PRE CLI-PARAM-LOOP: [\$#:$#] arg='$arg'" 1>&2
       case "$arg" in
         -C|--conf) state=1; continue;; # COLLECT CONF_FILE if provided
         -l|--log) LOG="1"; continue;; 
@@ -665,12 +668,14 @@ state=0; for arg in "$@"; do
     *) err 065;;
   esac
 done
+[ $DBG ] && echo "$$| ~~~ PRE CLI-PARAM-LOOP --> VRB='$VRB', DBG='$DBG', DEEPDBG='$DEEPDBG', LOG='$LOG', QUIET='$QUIET', FORCE='$FORCE', FORCED_CONF_FILE='$FORCED_CONF_FILE' state='$state'" 1>&2  
 if [ -n "$FORCED_CONF_FILE" ]; then
-  [ $DBG ] && echo "$$| ~~~ Using CONF_FILE provided via --conf parameter '$FORCED_CONF_FILE'!"
+  [ $DBG ] && echo "$$| ~~~ Using CONF_FILE provided via --conf parameter '$FORCED_CONF_FILE'!" 1>&2
   CONF_FILE="$FORCED_CONF_FILE"
 fi
-[ "$state" = "1" ] && echo "$EXAMPLE_CONF" && exit 0; 
+[ "$state" -eq "1" ] && echo "$EXAMPLE_CONF" && exit 0; 
 [ -z "$CONF_FILE" ] && CONF_FILE="$DEFAULT_CONF_FILE";
+[ $DBG ] && echo "$$| ~~~                    --> CONF_FILE='$CONF_FILE'" 1>&2
 
 # set up the trap for a clean exit:
 for i in 0 1 2 3 4 5 6 7 8 9; do trap "cleanup \"TRAP\" $i;" $i; done;
@@ -702,7 +707,7 @@ CMD=""; ignore_params=""; state=1;
 
 while [ $# -gt 0 ]; do
   arg="$1"; shift;
-  [ $DBG ] && echo "$$|  ~  CLI-PARAM-LOOP: [\$#:$#] ignore_params = '$ignore_params'  state = '$state'   --   arg='$arg'"
+  [ $DBG ] && echo "$$|  ~  CLI-PARAM-LOOP: [\$#:$#] ignore_params = '$ignore_params'  state = '$state'   --   arg='$arg'" 1>&2
   [ -z "$ignore_params" ] && case "$arg" in
     -l|--log|-L|--no-log|-Q|--quiet|-V|--verbose|-D|--debug|-DD|--deep-debug|-F|--force) continue;; # IGNORE here as already detected above !
     -C|--conf) [ -n "$FORCED_CONF_FILE" ] && shift; continue;; # also skip parameter of --conf !
