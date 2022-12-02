@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# 067 == highest used errCode
+# 078 == highest used errCode
 
 US_CALL="$(echo "'$0'" "$@")";
 
@@ -19,21 +19,26 @@ CURL_OPTS="--silent --show-error";
 ##########################################################
 #### CONF DEFAULT VALUES:
 
+DEFAULT_SECRET="..."
+
 QUIET=;    # regular status output (independent of VRB output and DBG output and DEPDBG)
 VRB=;      # VERBOSE output (independent of 'regular status output' and DBG output and DEPDBG)
 DBG=;      # DEBUG   output (independent of 'regular status output' and VRB output and DEEPDBG)
 DEEPDBG="" # DEBUG OUTPUT of subcommands (independent of 'regular status output' and VRB output and DBG)
 FORCE=""
-DATENKELLER_LOGIN="..."
-DATENKELLER_PASSW="..."
-OTR_LOGIN="..."
-OTR_PASSW="..."
+DATENKELLER_LOGIN="$DEFAULT_SECRET"
+DATENKELLER_PASSW="$DEFAULT_SECRET"
+DATENKELLER_APIKEY="$DEFAULT_SECRET"
+OTR_LOGIN="$DEFAULT_SECRET"
+OTR_PASSW="$DEFAULT_SECRET"
 COOKIE_FILE="/tmp/my-otr___cookies.txt"
 LOGFILE=~/".my-otr.log";
 LOG="1"
 LOG_ERR_TO_SYSLOG="1";
 OTR_SEARCH_LIMIT="9999";
 OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
+GET_DLURL_CMD="wget"
+GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
 OTR_DL_CMD="aria2c"
 OTR_DL_CMD_PARAMS="--log=/tmp/my-otr___aria2c.log --log-level=notice --quiet -j9 -c"
 
@@ -56,11 +61,12 @@ EXAMPLE_CONF='
 # Only set this if you want to store my-otr.awk NOT in the same directory as my-otr and NOT in ~/.my-otr.awk:
 OUR_AWK_SCRIPT=""
 
-DATENKELLER_LOGIN="<YOUR https://otr.datenkeller.net LOGIN>"
-DATENKELLER_PASSW="<YOUR https://otr.datenkeller.net PASSWORD>"
+DATENKELLER_LOGIN='\''<YOUR https://otr.datenkeller.net LOGIN>'\''
+DATENKELLER_PASSW='\''<YOUR https://otr.datenkeller.net PASSWORD>'\''
+DATENKELLER_APIKEY='\''<YOUR https://otr.datenkeller.net APIKEY>'\'' # Login -> Settings -> API Key anzeigen
 
-OTR_LOGIN="<YOUR https://www.onlinetvrecorder.com LOGIN>"
-OTR_PASSW="<YOUR https://www.onlinetvrecorder.com PASSWORD>"
+OTR_LOGIN='\''<YOUR https://www.onlinetvrecorder.com LOGIN>'\''
+OTR_PASSW='\''<YOUR https://www.onlinetvrecorder.com PASSWORD>'\''
 
 # Regular status output (independent of VRB output and DBG output and DEPDBG)
 # Do NOT suppress "regular status output" (to do suppress, set QUIET=1)
@@ -108,7 +114,11 @@ get_decode_cmd() { # can use global variables: OTR_LOGIN, OTR_PASSW, OUTP_DIR, I
 # If there is no HQ but ONLY HD available the script will still download the HD version (!):
 #OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
 
-# Define download tool and the tool parameters (LAST paraeter will be the URL to be downloaded from):
+# Define download tool and the tool parameters; LAST parameter will be the URL to get the download URL from (will be parameter for OTR_DL_CMD):
+#GET_DLURL_CMD="wget"
+#GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
+
+# Define download tool and the tool parameters (LAST parameter will be the URL to be downloaded from):
 #OTR_DL_CMD="aria2c"
 #OTR_DL_CMD_PARAMS="--log=/tmp/my-otr___aria2c.log --log-level=notice --quiet -j9 -c"
 '
@@ -451,36 +461,36 @@ curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H '
 
 # uses DO_OTR_DECODE_AFTER_DL to decide if after DL follows an automatic DECODE or not.
 datenkeller_dl() { local url="$1";
-  otrkey_filename="${url##*/}"
-  decoded_filename="${otrkey_filename%.*}"
+  OTRKEY_FILENAME="${url##*/}"
+  DECODED_FILENAME="${OTRKEY_FILENAME%.*}"
   [ $DBG ] && echo "$$|  ~  datenkeller_dl(): url = '$url'"
-  [ $DBG ] && echo "$$|  ~  datenkeller_dl(): otrkey_filename = '$otrkey_filename'"
-  [ $DBG ] && echo "$$|  ~  datenkeller_dl(): decoded_filename = '$decoded_filename'"
+  [ $DBG ] && echo "$$|  ~  datenkeller_dl(): OTRKEY_FILENAME = '$OTRKEY_FILENAME'"
+  [ $DBG ] && echo "$$|  ~  datenkeller_dl(): DECODED_FILENAME = '$DECODED_FILENAME'"
 
   ### DUPLICATE CHECK:
-  if [ -e "$decoded_filename" ]; then 
+  if [ -e "$DECODED_FILENAME" ]; then 
     if [ -z "$FORCE" ]; then
-      [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename' already exists. Ignoring.\n$$|     Use --force to force redownloading + overwriting."
+      [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME' already exists. Ignoring.\n$$|     Use --force to force redownloading + overwriting."
       return 0;
     else
-      [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename' already exists. FORCING!\n$$|     BUT you provided --force to force redownloading + overwriting!" 
+      [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME' already exists. FORCING!\n$$|     BUT you provided --force to force redownloading + overwriting!" 
     fi
   fi
 
   ### DO THE DOWNLOAD:
   [ -x "$OTR_DL_CMD" ] || err 003 "'$OTR_DL_CMD' not found."
   [ $QUIET ] || echo "$$| >>> Downloading '$url'...";
-  [ $DBG ] && echo "$$|  ~  \"$OTR_DL_CMD\" $OTR_DL_CMD_PARAMS \"$awk_outp\""
-  "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$awk_outp" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$awk_outp\""
-  [ -s "$otrkey_filename" ] || err 035
+  [ $DBG ] && echo "$$|  ~  \"$OTR_DL_CMD\" $OTR_DL_CMD_PARAMS \"$url\""
+  "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$url" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$url\""
+  [ -s "$OTRKEY_FILENAME" ] || err 035
 
   [ $DO_OTR_DECODE_AFTER_DL ] || return 0
 
   ### DO THE DECODING:
-  [ $QUIET ] || echo "$$|  >  Decoding '$otrkey_filename'...";
-  [ $VRB ] && echo "$$|  >  Decoding to '$decoded_filename'...";
-  decode_one_file "$otrkey_filename" "." || err 036
-  [ -s "$decoded_filename" ] || err 037 "Decoded filename '$decoded_filename' should be non-empty file. But it's not. Please check."
+  [ $QUIET ] || echo "$$|  >  Decoding '$OTRKEY_FILENAME'...";
+  [ $VRB ] && echo "$$|  >  Decoding to '$DECODED_FILENAME'...";
+  decode_one_file "$OTRKEY_FILENAME" "." || err 036
+  [ -s "$DECODED_FILENAME" ] || err 037 "Decoded filename '$DECODED_FILENAME' should be non-empty file. But it's not. Please check."
 
   return 0
 }
@@ -522,10 +532,10 @@ better_quality() { local what="$1"; local compare_with="$2"; local cap_at="$3";
 }
 
 
-# gets '$decoded_filename', sets '$existing_files': each line = 1 existing filename "in competition with (because potential duplicate of)" '$decoded_filename'
-set_existing_files() { local decoded_filename="$1"; 
-  decoded_fileBASE="$(echo "$decoded_filename"|sed -n 's|_TVOON_DE[.]mpg.*|_TVOON_DE.mpg|p')"; [ -z "$decoded_fileBASE" ] && err 039 "decoded_filename = '$decoded_filename'"
-  quality_of_fn "$decoded_filename"; [ -z "$RES" ] && err 040 "decoded_filename = '$decoded_filename'"; decoded_fileQUALITY=$RES; 
+# gets '$DECODED_FILENAME', sets '$existing_files': each line = 1 existing filename "in competition with (because potential duplicate of)" '$DECODED_FILENAME'
+set_existing_files() { local DECODED_FILENAME="$1"; 
+  decoded_fileBASE="$(echo "$DECODED_FILENAME"|sed -n 's|_TVOON_DE[.]mpg.*|_TVOON_DE.mpg|p')"; [ -z "$decoded_fileBASE" ] && err 039 "DECODED_FILENAME = '$DECODED_FILENAME'"
+  quality_of_fn "$DECODED_FILENAME"; [ -z "$RES" ] && err 040 "DECODED_FILENAME = '$DECODED_FILENAME'"; decoded_fileQUALITY=$RES; 
   [ $DBG ] && echo "$$|  ~  set_existing_files(): decoded_fileBASE = '$decoded_fileBASE'"
   [ $DBG ] && echo "$$|  ~  set_existing_files(): decoded_fileQUALITY = '$decoded_fileQUALITY'"
 
@@ -544,34 +554,34 @@ set_existing_files() { local decoded_filename="$1";
 }
 
 
-# uses '$decoded_filename' and returns "1" if a DUPLICATE was found
-duplicate_check() { local decoded_filename="$1";
+# uses '$DECODED_FILENAME' and returns "1" if a DUPLICATE was found
+duplicate_check() { local DECODED_FILENAME="$1";
   ### DUPLICATE CHECK:
-  if [ -e "$decoded_filename" ]; then 
+  if [ -e "$DECODED_FILENAME" ]; then 
     if [ -z "$FORCE" ]; then
-      [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename' already exists. Ignoring. (use --force to re-download + overwrite)"
+      [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME' already exists. Ignoring. (use --force to re-download + overwrite)"
       return 1;
     else
-      [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename' already exists. FORCING! (due to --force parameter)"
+      [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME' already exists. FORCING! (due to --force parameter)"
     fi
   fi
 
   ### DUPLICATE FILE (different quality) CHECK:
-  set_existing_files "$decoded_filename";
+  set_existing_files "$DECODED_FILENAME";
   if [ -n "$existing_files" ]; then
     existing_fileQUALITY="$(echo "$existing_files"|while read a; do quality_of_fn "$a"; echo "$RES"; done|xargs)"; [ -z "$existing_fileQUALITY" ] && err 041
     [ $DBG ] && echo "$$|  ~  duplicate_check(): existing_fileQUALITY = '$existing_fileQUALITY'"
     i=0; for a in $existing_fileQUALITY; do better_quality "$decoded_fileQUALITY" "$a" "$OTR_QUALITY_CAP"; i=$(( $i + $RES )); done
     [ $DBG ] && echo "$$|  ~  duplicate_check(): decoded_fileQUALITY '$decoded_fileQUALITY' was better than #'$i' entries of existing_fileQUALITY '$existing_fileQUALITY'"
     if [ $i -eq 0 ]; then
-      [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename' WORSE /or/ EQUAL than existing file quality '$existing_fileQUALITY'. Ignoring."
+      [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME' WORSE /or/ EQUAL than existing file quality '$existing_fileQUALITY'. Ignoring."
       return 1;
     else
-      [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename' BETTER than existing file quality '$existing_fileQUALITY'.\n$$|     Will redownload!"
+      [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME' BETTER than existing file quality '$existing_fileQUALITY'.\n$$|     Will redownload!"
       return 0;
     fi
   else
-    [ $VRB ] && echo "$$|  >  Decoded filename '$decoded_filename': No existing files found --> Will redownload!"
+    [ $VRB ] && echo "$$|  >  Decoded filename '$DECODED_FILENAME': No existing files found --> Will redownload!"
     return 0;
   fi
 
@@ -591,38 +601,65 @@ datenkeller_get() {
       20[0-9][0-9]-[1][0-2]-[0-3][0-9]"	"*) url="$(echo "$line"|cut -f 8)";;
       *) err 030 "line = '$line'";;
     esac
-    [ -z "$url" ] && err 031 || url="https://otr.datenkeller.net/index.php$url"
-    otrkey_filename="$(echo "$url"|sed -n 's|.*/?getFile=||p')"; [ -z "$otrkey_filename" ] && err 038
-    decoded_filename="${otrkey_filename%.*}"
-    [ $DBG ] && echo "$$|  ~  datenkeller_get(): otrkey_filename = '$otrkey_filename'"
-    [ $DBG ] && echo "$$|  ~  datenkeller_get(): decoded_filename = '$decoded_filename'"
+    [ -z "$url" ] && err 031
+    OTRKEY_FILENAME="$(echo "$url"|sed -n 's|^/?getFile=||p')"; [ -z "$OTRKEY_FILENAME" ] && err 038
+    DECODED_FILENAME="${OTRKEY_FILENAME%.*}"
+    [ $DBG ] && echo "$$|  ~  datenkeller_get(): OTRKEY_FILENAME = '$OTRKEY_FILENAME'"
+    [ $DBG ] && echo "$$|  ~  datenkeller_get(): DECODED_FILENAME = '$DECODED_FILENAME'"
 
-    [ $DBG ] && echo "$$|  ~  datenkeller_get(): CALLING duplicate_check '$decoded_filename'..."
-    duplicate_check "$decoded_filename"; rc=$?; # returns 1 if DUPLICATE was found !
+    [ $DBG ] && echo "$$|  ~  datenkeller_get(): CALLING duplicate_check '$DECODED_FILENAME'..."
+    duplicate_check "$DECODED_FILENAME"; rc=$?; # returns 1 if DUPLICATE was found !
     case "$rc" in
        1) duplicate_skip_cnt="$(( $duplicate_skip_cnt + 1 ))";
-          [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on decoded_filename: YES, we have a duplicate! -->> SKIPPING ($duplicate_skip_cnt. time)!"
+          [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on DECODED_FILENAME: YES, we have a duplicate! -->> SKIPPING ($duplicate_skip_cnt. time)!"
           continue;;
-       0) [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on decoded_filename: NO duplicate -->> so we can download now :)";;
+       0) [ $DBG ] && echo "$$|  ~  datenkeller_get(): duplicate_check on DECODED_FILENAME: NO duplicate -->> so we can download now :)";;
        *) err 044;;
     esac
 
     ### STARTING DOWNLOAD:
-    [ $DBG ] && echo "$$|  ~  Downloading Download-Page '$url'...";
-    curl $CURL_OPTS -X GET --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' "$url" >"$TEMPFILE" || err 029
-    [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" get"
-    while read awk_outp; do
-      case "$awk_outp" in
-        "DBG:"*) echo "$$|  ~  [awk] $awk_outp";;
-        *) #[ $DBG ] && echo "$$|  ~  datenkeller_dl \"$awk_outp\""
-           datenkeller_dl "$awk_outp" || err 033
-           download_cnt="$(( $download_cnt + 1 ))";;
-      esac
-    done << EOL || err 032
-$(awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" "$TEMPFILE" get)
-EOL
+###OLD:#     GETDLURL_URL="https://otr.datenkeller.net/index.php$url";
+    GETDLURL_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$DATENKELLER_APIKEY&getLinkFor=$OTRKEY_FILENAME"
+    [ $DBG ] && echo "$$|  ~  datenkeller_get(): GETDLURL_URL = '$GETDLURL_URL'"
+
+    ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
+    [ -x "$OTR_DL_CMD" ] || err 003 "'$OTR_DL_CMD' not found."
+    [ $QUIET ] || echo "$$| >>> Downloading '$GETDLURL_URL'...";
+    cmdstr="\"$GET_DLURL_CMD\" $GET_DLURL_CMD_PARAMS \"$GETDLURL_URL\""
+    [ $DBG ] && echo "$$|  ~  GET_DL_CMD: GET_DLURL_CMD cmdstr = '$cmdstr'"
+    outp="$("$GET_DLURL_CMD" $GET_DLURL_CMD_PARAMS "$GETDLURL_URL")" || err 072 "ERROR: FAILED [$?]: $cmdstr"
+    [ $DBG ] && echo "$$|  ~  datenkeller_get(): GET_DLURL_CMD outp = '$outp'"
+    #
+    DLURL="$(echo "$outp"|sed -n 's/^OK: //p')" || err 073 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
+    [ -z "$DLURL" ] && err 074 "ERROR: $cmdstr --> '$outp' --> DLURL='$DLURL' !?"
+    [ $DBG ] && echo "$$|  ~  datenkeller_get(): DLURL = '$DLURL'"
+
+    datenkeller_dl "$DLURL" || err 033 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
+    download_cnt="$(( $download_cnt + 1 ))";
+
+    continue
+
+###OLD:#     ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
+###OLD:#     curl $CURL_OPTS -X GET --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' "$url" >"$TEMPFILE" || err 029
+###OLD:#     [ $DBG ] && echo "$$|  ~  awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" get"
+###OLD:#     local awk_outp_full="$(awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" "$TEMPFILE" get)" || err 032 "FAILED [$?]: awk -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
+###OLD:#     [ -z "$awk_outp_full" ] && err 071 "FAILED [empty output]: awk -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
+###OLD:#     while read awk_outp; do
+###OLD:#       case "$awk_outp" in
+###OLD:#         "DBG:"*) echo "$$|  ~  [awk] $awk_outp";;
+###OLD:#         "") [ $DEEBDBG ] && echo "$$|  ~  datenkeller_get() Ignored empty line from awk_outp!";;
+###OLD:#         *) [ $DEEPDBG ] && echo "$$|  ~  datenkeller_get() -> datenkeller_dl \"$awk_outp\""
+###OLD:#            datenkeller_dl "$awk_outp" || err 033 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
+###OLD:#            download_cnt="$(( $download_cnt + 1 ))";;
+###OLD:#       esac
+###OLD:#       continue
+###OLD:#     done << EOL
+###OLD:# $awk_outp_full
+###OLD:# EOL
+
   done
-  [ $(( $download_cnt + $duplicate_skip_cnt )) -eq $total_cnt ] || err 067 "We read '$total_cnt' lines from stdin. Skipped '$duplicate_skip_cnt' lines. Downloaded '$download_cnt' lines. This should ADD UP (total = skipped + downloaded), but it does not!" 
+
+  [ $(( $download_cnt + $duplicate_skip_cnt )) -eq $total_cnt ] || err 067 "We read '$total_cnt' lines from stdin. Skipped '$duplicate_skip_cnt' lines. Downloaded '$download_cnt' lines. This should ADD UP (total = skipped + downloaded), but it does not!"
   [ $DBG ] && echo "$$|  ~  Done."
   [ $QUIET ] || echo "$$| >>> DONE (successfully processed $total_cnt lines read from stdin: $duplicate_skip_cnt skipped, $download_cnt downloaded)" 
 }
@@ -683,6 +720,13 @@ for i in 0 1 2 3 4 5 6 7 8 9; do trap "cleanup \"TRAP\" $i;" $i; done;
 # first read DEFAULT values for DBG + VRB from CONF_FILE !
 [ -s "$CONF_FILE" ] || err 004 "Missing CONFIG FILE '$CONF_FILE'. Please call with --help and read on '--conf' parameter!"
 . "$CONF_FILE" || err 006 "Failed reading CONFIG FILE '$CONF_FILE'."
+
+# check some CONFI_FILE variables/parameters:
+[ "$DATENKELLER_LOGIN" = "$DEFAULT_SECRET" ] && err 075 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_LOGIN. But this is needed!"
+[ "$DATENKELLER_PASSW" = "$DEFAULT_SECRET" ] && err 076 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_PASSW. But this is needed!"
+[ "$DATENKELLER_APIKEY" = "$DEFAULT_SECRET" ] && err 077 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_APIKEY. But this is needed!"
+[ "$OTR_LOGIN" = "$DEFAULT_SECRET" ] && err 075 "CONF_FILE: '$CONF_FILE' does not seem to set OTR_LOGIN. But this is needed!"
+[ "$OTR_PASSW" = "$DEFAULT_SECRET" ] && err 076 "CONF_FILE: '$CONF_FILE' does not seem to set OTR_PASSW. But this is needed!"
 
 [ $# -eq 0 ] && usage
 
