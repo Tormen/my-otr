@@ -1,10 +1,9 @@
 #!/bin/sh
 
-# 078 == highest used errCode
-
-US_CALL="$(echo "'$0'" "$@")";
+# 083 == highest used errCode
 
 US=${0##*/};   # get filename without path
+US_CALL="\"$0\""; for a in "$@"; do US_CALL="$US_CALL \"$a\""; done
 
 NOW="$( date +"%Y-%m-%d_%H%M.%S")"
 
@@ -40,6 +39,7 @@ LOG="1"
 LOG_ERR_TO_SYSLOG="1";
 OTR_SEARCH_LIMIT="9999";
 OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
+GAWK_CMD="gawk" # We need GNU awk !
 GET_DLURL_CMD="wget"
 GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
 OTR_DL_CMD="aria2c"
@@ -58,6 +58,9 @@ NL="
 
 EXAMPLE_CONF='
 # Commented lines of VARIABLES below show the DEFAULT VALUES; feel free to adapt.
+
+# Define GNU awk path to be used when calling awk to execute OUR_AWK_SCRIPT:
+GAWK_CMD="gawk"
 
 # Only set this if you want to store my-otr.awk NOT in the same directory as my-otr and NOT in ~/.my-otr.awk:
 OUR_AWK_SCRIPT=""
@@ -236,6 +239,7 @@ cleanup() { local rc=$?;
   exit $rc; # return does not suffice
 }
 
+urlencode() { python3 -c "import urllib.parse; print( urllib.parse.quote(input()) )" <<< "$1"; }
 
 redirectToLOG() {
   [ -z "$LOG" ] && return;
@@ -378,7 +382,7 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
 otr_decode() {
   dbg "otr_decode(): OUTP_DIR='$OUTP_DIR', FILES='$FILES'"
   [ -z "$OUTP_DIR" ] && OUTP_DIR="$DEFAULT_DECODE_OUTP_DIR" && feko "Defaulting to OUTPUT DIR '$OUTP_DIR'! (from DEFAULT_DECODE_OUTP_DIR in config file)\n\nWaiting 3 seconds!    ---    Press CTRL+C to abort" && sleep 3
-  [ -z "$OUTP_DIR$DEFAULT_DECODE_OUTP_DIR" ] && err 066 "'decode' command, but NO <OUTPUT-DIR> specified\nAND no DEFAULT_DECODE_OUTP_DIR in config file '$CONF_FILE' set!"
+  [ -z "$OUTP_DIR$DEFAULT_DECODE_OUTP_DIR" ] && err 057 "'decode' command, but NO <OUTPUT-DIR> specified\nAND no DEFAULT_DECODE_OUTP_DIR in config file '$CONF_FILE' set!"
 
   mkdir -p "$OUTP_DIR" || err 019 "mkdir -p \"$OUTP_DIR\""
   chown me:mine "$OUTP_DIR" || err 047 "chown me:mine \"$OUTP_DIR\""
@@ -410,7 +414,7 @@ EOB
 # FILTER_FROM_DATE="";
 # FILTER_TIL_DATE="";
 # 
-# # to filter AFTERWARDS on the results (via the awk script):
+# # to filter AFTERWARDS on the results (via OUR_AWK_SCRIPT):
 # FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
 # FILTER_DESCRIPTION="";
 # FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
@@ -456,10 +460,13 @@ print(f\"%22search%22%3A%22{f('$filter_title')}%22%2C%22sender%22%3A%22{f('$filt
 #echo "-d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E\"" >/tmp/xxx
 
 # -H 'Content-Length: 482' 
-curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E" https://otr.datenkeller.net/index.php|tr ";" "\n" >"$TEMPFILE" || err 025
+  tmp="$(curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E" https://otr.datenkeller.net/index.php 2>&1)" \
+  || err 025 "ERROR [$?]: curl $CURL_OPTS -X POST --cookie \"$COOKIE_FILE\" --cookie-jar \"$COOKIE_FILE\" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: \"Microsoft Edge\";v=\"95\", \"Chromium\";v=\"95\", \";Not A Brand\";v=\"99\"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: \"macOS\"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E\" https://otr.datenkeller.net/index.php 2>&1${NL}${NL}-->${NL}'$tmp'<<<<<${NL}^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+  [ -z "$tmp" ] && err 083
+  echo "$tmp"|tr ";" "\n" >"$TEMPFILE"
 
-  dbg "awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
-  tmp="$(awk -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 052 "awk returned [$?]. Executing: awk -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" search"
+  dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
+  tmp="$("$GAWK_CMD" -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 052 "'$GAWK_CMD' returned [$?]. Executing: \"$GAWK_CMD\" -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
   tmp_c="$(( $(echo "$tmp"|wc -l) + 0 ))";
   /usr/bin/printf "$tmp\n" || err 070 # use printf to avoid "echo: write error: Broken pipe". SEE: https://superuser.com/questions/554855/how-can-i-fix-a-broken-pipe-error
 
@@ -492,7 +499,7 @@ datenkeller_dl() { local url="$1";
   fi
 
   ### DO THE DOWNLOAD:
-  [ -x "$OTR_DL_CMD" ] || err 003 "'$OTR_DL_CMD' not found."
+  [ -x "$OTR_DL_CMD" ] || err 081 "OTR_DL_CMD '$OTR_DL_CMD' not found."
   VRBPFX="$DEFAULT_VRBPFX"; eko "Downloading '$url'..."; VRBPFX="$$|  >  "
   dbg "\"$OTR_DL_CMD\" $OTR_DL_CMD_PARAMS \"$url\""
   "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$url" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$url\""
@@ -559,7 +566,7 @@ set_existing_files() { local DECODED_FILENAME="$1";
 
   dbg "set_existing_files(): CALLING get_alternate_local_filenames( \"$decoded_fileBASE\" \"$decoded_fileQUALITY\" $split_filename)..."
   additional_files="$(get_alternate_local_filenames "$decoded_fileBASE" "$decoded_fileQUALITY" $split_filename)" || err 042 "FAILED [$?] Calling get_alternate_local_filenames '$decoded_fileBASE' '$decoded_fileQUALITY' '$split_filename'\n(error code != 0, make sure to explicitly return 0 when successful).";
-  if [ $VRB ]; then [ -n "$additional_files" ] vrb "get_alternate_local_filenames():\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")";
+  if [ $VRB ]; then [ -n "$additional_files" ] && vrb "get_alternate_local_filenames():\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")";
   elif [ $DBG ]; then dbg "set_existing_files(): CALLING get_alternate_local_filenames( ... ): $( [ -z "$additional_files" ] && echo "NO additional_files found!" || echo "GOT additional_files:\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")" )";
   fi
 
@@ -635,31 +642,31 @@ datenkeller_get() {
 
     ### STARTING DOWNLOAD:
 ###OLD:#     GETDLURL_URL="https://otr.datenkeller.net/index.php$url";
-    GETDLURL_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$DATENKELLER_APIKEY&getLinkFor=$OTRKEY_FILENAME"
+    GETDLURL_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$(urlencode "$DATENKELLER_APIKEY" )&getLinkFor=$OTRKEY_FILENAME"
     dbg "datenkeller_get(): GETDLURL_URL = '$GETDLURL_URL'"
 
     ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
-    [ -x "$OTR_DL_CMD" ] || err 003 "'$OTR_DL_CMD' not found."
+    [ -x "$OTR_DL_CMD" ] || err 003 "OTR_DL_CMD '$OTR_DL_CMD' not found."
     VRBPFX="$$| >>> "; vrb "Downloading '$GETDLURL_URL'..."; # we do NOT reset VRBPFX here, because we will next call datenkeller_dl() !
     cmdstr="\"$GET_DLURL_CMD\" $GET_DLURL_CMD_PARAMS \"$GETDLURL_URL\""
     dbg "GET_DL_CMD: GET_DLURL_CMD cmdstr = '$cmdstr'"
-    outp="$("$GET_DLURL_CMD" $GET_DLURL_CMD_PARAMS "$GETDLURL_URL")" || err 072 "ERROR: FAILED [$?]: $cmdstr"
+    outp="$("$GET_DLURL_CMD" $GET_DLURL_CMD_PARAMS "$GETDLURL_URL")" || err 072 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
     dbg "datenkeller_get(): GET_DLURL_CMD outp = '$outp'"
     #
     DLURL="$(echo "$outp"|sed -n 's/^OK: //p')" || err 073 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
     [ -z "$DLURL" ] && err 074 "ERROR: $cmdstr --> '$outp' --> DLURL='$DLURL' !?"
     dbg "datenkeller_get(): DLURL = '$DLURL'"
 
-    datenkeller_dl "$DLURL" || err 033 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
+    datenkeller_dl "$DLURL" || err 082 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
     download_cnt="$(( $download_cnt + 1 ))";
 
     continue
 
 ###OLD:#     ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
 ###OLD:#     curl $CURL_OPTS -X GET --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' "$url" >"$TEMPFILE" || err 029
-###OLD:#     dbg "awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" \"$TEMPFILE\" get"
-###OLD:#     local awk_outp_full="$(awk -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" "$TEMPFILE" get)" || err 032 "FAILED [$?]: awk -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
-###OLD:#     [ -z "$awk_outp_full" ] && err 071 "FAILED [empty output]: awk -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
+###OLD:#     dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
+###OLD:#     local awk_outp_full="$("$GAWK_CMD" -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" "$TEMPFILE" get)" || err 032 "FAILED [$?]: \"$GAWK_CMD\" -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
+###OLD:#     [ -z "$awk_outp_full" ] && err 071 "FAILED [empty output]: \"$GAWK_CMD\" -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
 ###OLD:#     while read awk_outp; do
 ###OLD:#       case "$awk_outp" in
 ###OLD:#         "DBG:"*) dbg "[awk] $awk_outp";;
@@ -741,12 +748,18 @@ for i in 0 1 2 3 4 5 6 7 8 9; do trap "cleanup \"TRAP\" $i;" $i; done;
 [ -s "$CONF_FILE" ] || err 004 "Missing CONFIG FILE '$CONF_FILE'. Please call with --help and read on '--conf' parameter!"
 . "$CONF_FILE" || err 006 "Failed reading CONFIG FILE '$CONF_FILE'."
 
-# check some CONFI_FILE variables/parameters:
-[ "$DATENKELLER_LOGIN" = "$DEFAULT_SECRET" ] && err 075 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_LOGIN. But this is needed!"
-[ "$DATENKELLER_PASSW" = "$DEFAULT_SECRET" ] && err 076 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_PASSW. But this is needed!"
-[ "$DATENKELLER_APIKEY" = "$DEFAULT_SECRET" ] && err 077 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_APIKEY. But this is needed!"
-[ "$OTR_LOGIN" = "$DEFAULT_SECRET" ] && err 075 "CONF_FILE: '$CONF_FILE' does not seem to set OTR_LOGIN. But this is needed!"
-[ "$OTR_PASSW" = "$DEFAULT_SECRET" ] && err 076 "CONF_FILE: '$CONF_FILE' does not seem to set OTR_PASSW. But this is needed!"
+# check some CONFIG FILE '$CONFIG_FILE' variables/parameters:
+[ "$DATENKELLER_LOGIN" = "$DEFAULT_SECRET" ] && err 075 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_LOGIN. But this variable is needed!"
+[ "$DATENKELLER_PASSW" = "$DEFAULT_SECRET" ] && err 076 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_PASSW. But this variable is needed!"
+[ "$DATENKELLER_APIKEY" = "$DEFAULT_SECRET" ] && err 077 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_APIKEY. But this variable is needed!"
+[ "$OTR_LOGIN" = "$DEFAULT_SECRET" ] && err 078 "CONF_FILE '$CONF_FILE' does not seem to set OTR_LOGIN. But this variable is needed!"
+[ "$OTR_PASSW" = "$DEFAULT_SECRET" ] && err 079 "CONF_FILE '$CONF_FILE' does not seem to set OTR_PASSW. But this variable is needed!"
+[ -z "$COOKIE_FILE" ] && err 012 "CONF_FILE '$CONF_FILE' does not seem to set COOKIE_FILE. But this variable is needed!"
+[ -z "$DATENKELLER_LOGIN" ] && err 013 "CONF_FILE '$CONF_FILE' does not seem to set DATENKELLER_LOGIN. But this variable is needed!"
+[ -z "$DATENKELLER_PASSW" ] && err 014 "CONF_FILE '$CONF_FILE' does not seem to set DATENKELLER_PASSW. But this variable is needed!"
+[ -z "$GAWK_CMD" ] && err 080 "CONFIG FILE '$CONF_FILE' does not seem to set GAWK_CMD. But this variable is needed!"
+tmp="$( "$GAWK_CMD" --version 2>&1 )" || err 084 "GAWK_CMD '$GAWK_CMD' not found /or/ not executable. Please check GAWK_CMD in CONFIG FILE '$CONFIG_FILE'."
+"$GAWK_CMD" --version 2>&1 | grep -q "GNU Awk" || err 026 "Please check GAWK_CMD in CONFIG FILE '$CONFIG_FILE':${NL}Current value of GAWK_CMD: '$GAWK_CMD'. But this does not seem to be a GNU version of awk?!"
 
 [ $# -eq 0 ] && usage
 
@@ -876,9 +889,7 @@ if [ $DBG ]; then
   dbg "CMD: '$CMD'"
 fi
 
-[ -z "$COOKIE_FILE" ] && err 012
-[ -z "$DATENKELLER_LOGIN" ] && err 013
-[ -z "$DATENKELLER_PASSW" ] && err 014
+# CHECK COMMANDLINE PARAMETERS:
 #[ -n "$FILTER_FROM_DATE" -a -z "$FILTER_TIL_DATE" ] && err 027 "You provided >DATE without <DATE. Not possible. Call with --help."
 [ -z "$FILTER_FROM_DATE" -a -n "$FILTER_TIL_DATE" ] && err 028 "You provided <DATE without >DATE. Not possible. Call with --help."
 [ -n "$FILTER_DATE" -a -n "$FILTER_FROM_DATE$FILTER_TIL_DATE" ] && err 054 "You provided @DATE AND either <DATE or >DATE. Not possible. Call with --help."
