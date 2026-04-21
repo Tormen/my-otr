@@ -1,11 +1,13 @@
 #!/bin/sh
 
-# 083 == highest used errCode
+# 086 == highest used errCode
 
 US=${0##*/};   # get filename without path
 US_CALL="\"$0\""; for a in "$@"; do US_CALL="$US_CALL \"$a\""; done
 
 NOW="$( date +"%Y-%m-%d_%H%M.%S")"
+
+. "/LINKS/default/my-cmdstrs" || { /LINKS/bin/my-notify -- "[$US] ERROR:" "FAILED [$?] TO ACCESS CMDSTRFILE. EXITING."; exit 1; }
 
 #########################################################
 
@@ -39,11 +41,13 @@ LOG="1"
 LOG_ERR_TO_SYSLOG="1";
 OTR_SEARCH_LIMIT="9999";
 OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
-GAWK_CMD="gawk" # We need GNU awk !
-GET_DLURL_CMD="wget"
+GAWK_CMD="$c_gawk" # We need GNU awk !
+SEARCH_CMD="$c_wget"
+SEARCH_CMD_PARAMS="--quiet --output-document=-"
+GET_DLURL_CMD="$c_wget"
 GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
-OTR_DL_CMD="aria2c"
-OTR_DL_CMD_PARAMS="--log=/tmp/my-otr___aria2c.log --log-level=notice --quiet -j9 -c"
+OTR_DL_CMD="$c_aria2c"
+OTR_DL_CMD_PARAMS="--log=/tmp/my-otr___aria2c.log --log-level=notice -j1 -c" # -j3 --quiet 
 
 
 ##########################################################
@@ -161,8 +165,8 @@ COMMAND can be:
 
   [--]login    <<< will NOT re-loging if cookie file found; except if FORCE is used <<< #TODO# automatically re-login in case cookie is not valid anymore
 
-  [--]search   <<< allow filtering via additional parameters: 
-                   MANDATORY parameter: 
+  [--]search   <<< allow filtering via additional parameters:
+                   MANDATORY parameter:
                        TITLE SEARCH TEXT <<< text to search for in titles (this is what you would type into searchbox on otr.datenkeller.net!)
                                          <<< will STOP to take parameters as TITLE-SEARCH-TEXT when a ',' is found!
                    OPTIONAL parameters: All parameters starting with '@' can be provided multiple times!
@@ -215,17 +219,22 @@ DEFAULT_DBGPFX="$$| ~~~ "
 VRBPFX="$DEFAULT_VRBPFX"
 DBGPFX="$DEFAULT_DBGPFX"
 
-# echo() && forced_echo():
-eko() { [ $QUIET ]   && return; local nl="\n"; [ "$2" = "0" ] && nl=""; printf "%s$nl" "$1"|sed -e "s/^/$VRBPFX/" 1>&2; } # 2nd param is "0" -> avoid trailing NL
-feko(){                         local nl="\n"; [ "$2" = "0" ] && nl=""; printf "%s$nl" "$1"|sed -e "s/^/$VRBPFX/" 1>&2; } # 2nd param is "0" -> avoid trailing NL
-vrb() { [ $VRB ]     || return; local nl="\n"; [ "$2" = "0" ] && nl=""; printf "%s$nl" "$1"|sed -e "s/^/$VRBPFX/" 1>&2; } # 2nd param is "0" -> avoid trailing NL
-dbg() { [ $DBG ]     || return; local nl="\n"; [ "$2" = "0" ] && nl=""; printf "%s$nl" "$1"|sed -e "s/^/$DBGPFX/" 1>&2; } # 2nd param is "0" -> avoid trailing NL
-ddbg(){ [ $DEEPDBG ] || return; local nl="\n"; [ "$2" = "0" ] && nl=""; printf "%s$nl" "$1"|sed -e "s/^/$DBGPFX/" 1>&2; } # 2nd param is "0" -> avoid trailing NL
+addVRBPFX() { "$c_sed" -e "s/^/$VRBPFX/" -e "s/\\\n/\\
+$VRBPFX/g"; }
+
+# echo() && forced_echo() = feko == print to stdout + stderr !
+eko() { [ $QUIET ]   && return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
+feko(){ local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX;
+                                                "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
+
+vrb() { [ $VRB ]     || return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
+dbg() { [ $DBG ]     || return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
+ddbg(){ [ $DEEPDBG ] || return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
 
 
 err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
 NOW=""
-  local outp="@$( date +"%Y-%m-%d_%H%M.%S") ERROR $errCode [$exitCode]: $msg${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\"${NL}      and catch the output in file: \"--log --log-file my-otr.log\"${NL}  2.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  3.) Be PATIENT and I will /try/ come back to you!${NL}"
+  local outp="@$( date +"%Y-%m-%d_%H%M.%S") ERROR $errCode [$exitCode]: $msg${NL}${NL}PWD='$(pwd)'${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\"${NL}      and catch the output in file: \"--log --log-file my-otr.log\"${NL}  2.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  3.) Be PATIENT and I will /try/ come back to you!${NL}"
 
   VRBPFX="$$| "; feko "${NL}$outp"
   [ $LOG_ERR_TO_SYSLOG ] && logger -t "$US" "$outp"
@@ -239,8 +248,19 @@ cleanup() { local rc=$?;
   exit $rc; # return does not suffice
 }
 
-urlencode() { python3 -c "import urllib.parse; print( urllib.parse.quote(input()) )" <<< "$1"; }
+urlencode() {
+  local old_wd="$(pwd)"
+  dbg "urlencode(): old_wd='$old_wd', HOME='$HOME'"
+  cd "$HOME"
+  dbg "urlencode(): echo '$1'|\"$c_python3\" -c \"import urllib.parse; print( urllib.parse.quote(input()) )\""
+  echo "$1"|"$c_python3" -c "import urllib.parse; print( urllib.parse.quote(input()) )"; rc=$?;
+  cd "$old_wd";
+  dbg "urlencode(): rc='$rc'"
+  return "$rc";
+}
 
+
+REDIRECT_TO_LOG=;
 redirectToLOG() {
   [ -z "$LOG" ] && return;
 
@@ -258,8 +278,9 @@ less \"$LOGFILE\"
 "
   touch "$LOGFILE" || { rc=$?; m="FAILED [$rc] accessing logfile '$LOGFILE'."; logger -t mine "#$US: $m"; err 009 "$m"; }
   exec 4<&2 && exec 2>>"$LOGFILE" || err 000
+  REDIRECT_TO_LOG=1;
   # ^^ save stderr to descriptor #4 && redirect stderr > LOGFILE
-  #    but keep stdin open! :)
+  #    but keep stdout + stdin open! :)
 }
 
 
@@ -283,7 +304,7 @@ datenkeller_login() {
   fi
 
   dbg "Creating a PHP session at otr.datenkeller.net..."
-  curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X GET  -b "" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'sec-ch-ua-mobile: ?0' -H 'sec-ch-ua-platform: "macOS"' -H 'DNT: 1' -H 'Upgrade-Insecure-Requests: 1' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9' -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' -H 'Sec-Fetch-Dest: document' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' -d "" 'https://otr.datenkeller.net/' >/dev/null || err 021
+  curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X GET  -b "" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'sec-ch-ua-mobile: ?0' -H 'sec-ch-ua-platform: "macOS"' -H 'DNT: 1' -H 'Upgrade-Insecure-Requests: 1' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9' -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' -H 'Sec-Fetch-Dest: document' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' -d "" 'https://otr.datenkeller.net/' >/dev/null || err 021 "If you see this error, please check: Do you have internet ?"
 
   dbg "Logging into otr.datenkeller.net..."
   # -H 'Content-Length: 134' 
@@ -337,9 +358,11 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
   DBGPFX="$DEFAULT_DBGPFX";
   dbg "decode_one_file(): INP_FILE='$INP_FILE' OUTP_DIR='$OUTP_DIR'"
   DBGPFX="$$|  ~  "
-  if [ -z "$OUTP_DIR" ]; then OUTP_DIR="."
+  WD="$(/bin/pwd)"
+  dbg "Working directory: '$WD'"
+  if [ -z "$OUTP_DIR" -o "$OUTP_DIR" = "." ]; then OUTP_DIR="$WD" # working directory (pwd)
   else
-    cd "$OUTP_DIR" || err 061;
+    #cd "$OUTP_DIR" || err 061; # avoid cd within my-or && get_decode_cmd needs to take care of the target directory (OUTP_DIR)!
     if [ ! -e "$INP_FILE" ]; then
       local tmp="$WD/$INP_FILE"
       [ ! -e "$tmp" ] && err 049 "Unable to find INP_FILE.
@@ -371,7 +394,10 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
     ddbg "$outp"
     ddbg "SUCCESS. DECODED FILE WRITTEN TO: '$OUTP_DIR'\n"
   else
-    err 050 "FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND:\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
+    # err 050 "FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
+    echo;
+    echo "WARNING !!!"
+    echo "WARNING: FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
   fi
 
   return 0
@@ -380,13 +406,13 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
 
 
 otr_decode() {
-  dbg "otr_decode(): OUTP_DIR='$OUTP_DIR', FILES='$FILES'"
+  echo "otr_decode(): OUTP_DIR='$OUTP_DIR', FILES='$FILES'"
   [ -z "$OUTP_DIR" ] && OUTP_DIR="$DEFAULT_DECODE_OUTP_DIR" && feko "Defaulting to OUTPUT DIR '$OUTP_DIR'! (from DEFAULT_DECODE_OUTP_DIR in config file)\n\nWaiting 3 seconds!    ---    Press CTRL+C to abort" && sleep 3
   [ -z "$OUTP_DIR$DEFAULT_DECODE_OUTP_DIR" ] && err 057 "'decode' command, but NO <OUTPUT-DIR> specified\nAND no DEFAULT_DECODE_OUTP_DIR in config file '$CONF_FILE' set!"
 
   mkdir -p "$OUTP_DIR" || err 019 "mkdir -p \"$OUTP_DIR\""
-  chown me:mine "$OUTP_DIR" || err 047 "chown me:mine \"$OUTP_DIR\""
-  chmod 770 "$OUTP_DIR" || err 048 "chmod 750 \"$OUTP_DIR\""
+  #chown me:mine "$OUTP_DIR" || err 047 "chown me:mine \"$OUTP_DIR\""
+  #chmod 770 "$OUTP_DIR" || err 048 "chmod 750 \"$OUTP_DIR\""
 
   if [ "$FILES" = "-" ]; then
     while read a; do
@@ -412,65 +438,50 @@ EOB
 # FILTER_FIRST_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
 # FILTER_TITLE="";
 # FILTER_FROM_DATE="";
-# FILTER_TIL_DATE="";
+# FILTER_TILL_DATE="";
 # 
 # # to filter AFTERWARDS on the results (via OUR_AWK_SCRIPT):
 # FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
 # FILTER_DESCRIPTION="";
 # FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
 # FILTER_FROM_TIME="";
-# FILTER_TIL_TIME="";
+# FILTER_TILL_TIME="";
 # FILTER_WEEKDAYS=""; # used to collect @WEEKDAY (sep by SPACE)
 # FILTER_DURATIONS=""; # used to collect @DURATION (sep by SPACE)
 # FILTER_FROM_DURATION="";
-# FILTER_TIL_DURATION="";
+# FILTER_TILL_DURATION="";
 datenkeller_search() {
   DBGPFX="$$|  ~  "
-  if [ -s "$COOKIE_FILE" ]; then
-    if [ -n "$FORCE" ]; then
-      dbg "COOKIE_FILE '$COOKIE_FILE' found, but you asked to '--force' --> logging in..."
-      datenkeller_login
-    fi
-  else
-    dbg "No COOKIE_FILE '$COOKIE_FILE' found --> logging in..."
-    datenkeller_login
-  fi
   # instantiate DEFAULT values used for search_str (hence the local new variable!):
-  local xjxr="$( get_xjxr )";
-  local filter_title=""; [ -n "$FILTER_TITLE" ] && filter_title="$FILTER_TITLE"
-  local filter_channel=""; [ -n "$FILTER_FIRST_CHANNEL" ] && [ "$FILTER_FIRST_CHANNEL" != "-" ] && filter_channel="$FILTER_FIRST_CHANNEL"
-  local filter_from_date=""; [ -n "$FILTER_FROM_DATE" ] && filter_from_date="$FILTER_FROM_DATE"
-  local filter_til_date=""; [ -n "$FILTER_TIL_DATE" ] && filter_til_date="$FILTER_TIL_DATE"
-  local search_str="$(python3 -c "import urllib.parse as ul;
-def f(x): return ul.quote_plus(x);
-print(f\"%22search%22%3A%22{f('$filter_title')}%22%2C%22sender%22%3A%22{f('$filter_channel')}%22%2C%22senderCountry%22%3Anull%2C%22datumVon%22%3A%22$filter_from_date%22%2C%22datumBis%22%3A%22$filter_til_date%22\");")"
+  local search_str="$( urlencode "$FILTER_TITLE" )" || err 086 "urlencode \"$FILTER_TITLE\""
+  #local search_str="$(python3 -c "import urllib.parse as ul; def f(x): return ul.quote_plus(x); print(f\"$FILTER_TITLE\");")"
 
-  eko "Searching otr.datenkeller.net for \"$FILTER_TITLE\"$( [ -n "$FILTER_FIRST_CHANNEL" ] && [ "$FILTER_FIRST_CHANNEL" != "-" ] && echo ", @$FILTER_FIRST_CHANNEL" )$( [ -n "$FILTER_FROM_DATE" ] && echo ", >=$FILTER_FROM_DATE" )$( [ -n "$FILTER_TIL_DATE" ] && echo ", <=$FILTER_TIL_DATE" )"
-  dbg "xjxr='$xjxr' (ms since epoch (seconds since epoch with random ms ;)))"
-  dbg "filter_title='$filter_title'"
-  dbg "filter_channel='$filter_channel'"
-  dbg "filter_from_date='$filter_from_date'"
-  dbg "filter_til_date='$filter_til_date'"
+  eko "Searching otr.datenkeller.net for \"$FILTER_TITLE\""
   dbg "search_str='$search_str'"
 
+  OTR_APIKEY_URLENCODED="$( urlencode "$DATENKELLER_APIKEY" )" || err 086 "urlencode \"$DATENKELLER_APIKEY\""
 
-# -H 'Content-Length: 482' 
-  dbg "curl $CURL_OPTS -X POST --cookie \"$COOKIE_FILE\" --cookie-jar \"$COOKIE_FILE\" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: \"Microsoft Edge\";v=\"95\", \"Chromium\";v=\"95\", \";Not A Brand\";v=\"99\"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: \"macOS\"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E\" https://otr.datenkeller.net/index.php|tr \";\" \"\\n\" >\"$TEMPFILE\""
+  ### STARTING SEARCH:
+  SEARCH_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$OTR_APIKEY_URLENCODED&suche=$search_str&details&limit=-1"
+  dbg "datenkeller_search(): SEARCH_URL = '$SEARCH_URL'"
 
-#echo "-d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E\"" >/tmp/xxx
+  cmdstr="\"$SEARCH_CMD\" $SEARCH_CMD_PARAMS \"$SEARCH_URL\""
+  dbg "SEARCH: SEARCH_CMD cmdstr = '$cmdstr'"
+  outp="$("$SEARCH_CMD" $SEARCH_CMD_PARAMS "$SEARCH_URL")" || err 072 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
+  dbg "datenkeller_search(): SEARCH_CMD outp = '$outp'"
+  #
 
-# -H 'Content-Length: 482' 
-  tmp="$(curl $CURL_OPTS -X POST --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E" https://otr.datenkeller.net/index.php 2>&1)" \
-  || err 025 "ERROR [$?]: curl $CURL_OPTS -X POST --cookie \"$COOKIE_FILE\" --cookie-jar \"$COOKIE_FILE\" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: \"Microsoft Edge\";v=\"95\", \"Chromium\";v=\"95\", \";Not A Brand\";v=\"99\"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: \"macOS\"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: br' -H 'Accept-Language: en-GB,en;q=0.9' -d \"xjxfun=showListFiles&xjxr=$xjxr&xjxargs[]=Sall&xjxargs[]=S%3C!%5BCDATA%5Bjson%3A%20%7B${search_str}%2C%22dauer%22%3A%225%20Min%20-%20420%20Min%22%2C%22size%22%3A%2210%20MB%20-%209000%20MB%22%2C%22format%22%3Anull%2C%22genre%22%3A%22%22%2C%22limit%22%3A%22$OTR_SEARCH_LIMIT%22%2C%22sort%22%3A%22datum%22%2C%22sortOrder%22%3A%22desc%22%7D%5D%5D%3E\" https://otr.datenkeller.net/index.php 2>&1${NL}${NL}-->${NL}'$tmp'<<<<<${NL}^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-  [ -z "$tmp" ] && err 083
-  echo "$tmp"|tr ";" "\n" >"$TEMPFILE"
+  [ -z "$outp" ] && err 083 "NO OUTPUT FROM: $cmdstr"
+  echo "$outp" >"$TEMPFILE"
 
-  dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
-  tmp="$("$GAWK_CMD" -v DBG=$DEEPDBG -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TIL_TIME="$FILTER_TIL_TIME" -v DAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TIL_DURATION="$FILTER_TIL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 052 "'$GAWK_CMD' returned [$?]. Executing: \"$GAWK_CMD\" -v DBG=$DEEPDBG -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TIL_TIME=\"$FILTER_TIL_TIME\" -v DAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TIL_DURATION=\"$FILTER_TIL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
-  tmp_c="$(( $(echo "$tmp"|wc -l) + 0 ))";
+  dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -v FROM_DATE=\"$FILTER_FROM_DATE\" -v TILL_DATE=\"$FILTER_TILL_DATE\" -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TILL_TIME=\"$FILTER_TILL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TILL_DURATION=\"$FILTER_TILL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
+
+  tmp="$("$GAWK_CMD" -v DBG=$DEEPDBG -v FROM_DATE="$FILTER_FROM_DATE" -v TILL_DATE="$FILTER_TILL_DATE" -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TILL_TIME="$FILTER_TILL_TIME" -v WEEKDAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TILL_DURATION="$FILTER_TILL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 052 "'$GAWK_CMD' returned [$?]. Executing: \"$GAWK_CMD\" -v DBG=$DEEPDBG -v FROM_DATE=\"$FILTER_FROM_DATE\" -v TILL_DATE=\"$FILTER_TILL_DATE\" -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TILL_TIME=\"$FILTER_TILL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TILL_DURATION=\"$FILTER_TILL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
+  [ -z "$tmp" ] && tmp_c=0 || tmp_c="$(( $(echo "$tmp"|wc -l) + 0 ))";
   /usr/bin/printf "$tmp\n" || err 070 # use printf to avoid "echo: write error: Broken pipe". SEE: https://superuser.com/questions/554855/how-can-i-fix-a-broken-pipe-error
 
   eko "Found $tmp_c hits."
+  dbg "Result of $GAWK_CMD (each line 1 hit): '$tmp'"
   dbg "Done."
 
   return 0
@@ -510,7 +521,7 @@ datenkeller_dl() { local url="$1";
   ### DO THE DECODING:
   eko "Decoding '$OTRKEY_FILENAME'...";
   vrb "Decoding to '$DECODED_FILENAME'...";
-  decode_one_file "$OTRKEY_FILENAME" "." || err 036
+  decode_one_file "$OTRKEY_FILENAME" || err 036
   [ -s "$DECODED_FILENAME" ] || err 037 "Decoded filename '$DECODED_FILENAME' should be non-empty file. But it's not. Please check."
 
   return 0
@@ -566,9 +577,8 @@ set_existing_files() { local DECODED_FILENAME="$1";
 
   dbg "set_existing_files(): CALLING get_alternate_local_filenames( \"$decoded_fileBASE\" \"$decoded_fileQUALITY\" $split_filename)..."
   additional_files="$(get_alternate_local_filenames "$decoded_fileBASE" "$decoded_fileQUALITY" $split_filename)" || err 042 "FAILED [$?] Calling get_alternate_local_filenames '$decoded_fileBASE' '$decoded_fileQUALITY' '$split_filename'\n(error code != 0, make sure to explicitly return 0 when successful).";
-  if [ $VRB ]; then [ -n "$additional_files" ] && vrb "get_alternate_local_filenames():\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")";
-  elif [ $DBG ]; then dbg "set_existing_files(): CALLING get_alternate_local_filenames( ... ): $( [ -z "$additional_files" ] && echo "NO additional_files found!" || echo "GOT additional_files:\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")" )";
-  fi
+  if [ $VRB ]; then [ -n "$additional_files" ] && cnt="$(( $(echo "$additional_files"|wc -l) + 0 ))" || cnt=0; vrb "get_alternate_local_filenames(): $cnt hits"; [ -n "$additional_files" ] && echo "$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")"; fi;
+  if [ $DBG ]; then dbg "set_existing_files(): CALLING get_alternate_local_filenames( ... ): $( [ -z "$additional_files" ] && echo "NO additional_files found!" || echo "GOT additional_files:\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")" )"; fi
 
   existing_files="$( ls "$decoded_fileBASE"*.avi 2>/dev/null; ls "$decoded_fileBASE"*.mp4 2>/dev/null; echo "$additional_files" )"
   dbg "set_existing_files(): $( [ -z "$existing_files" ] && echo "NO existing_files FOUND!" || echo "FOUND existing_files:\n$(echo "$existing_files"|sed -e "s/^.*/   |\"&\"/")" )";
@@ -592,7 +602,7 @@ duplicate_check() { local DECODED_FILENAME="$1";
   if [ -n "$existing_files" ]; then
     existing_fileQUALITY="$(echo "$existing_files"|while read a; do quality_of_fn "$a"; echo "$RES"; done|xargs)"; [ -z "$existing_fileQUALITY" ] && err 041
     dbg "duplicate_check(): existing_fileQUALITY = '$existing_fileQUALITY'"
-    i=0; for a in $existing_fileQUALITY; do better_quality "$decoded_fileQUALITY" "$a" "$OTR_QUALITY_CAP"; i=$(( $i + $RES )); done
+    i=0; for a in $existing_fileQUALITY; do better_quality "$a" "$decoded_fileQUALITY" "$OTR_QUALITY_CAP"; i=$(( $i + $RES )); done
     dbg "duplicate_check(): decoded_fileQUALITY '$decoded_fileQUALITY' was better than #'$i' entries of existing_fileQUALITY '$existing_fileQUALITY'"
     if [ $i -eq 0 ]; then
       vrb "Decoded filename '$DECODED_FILENAME' WORSE /or/ EQUAL than existing file quality '$existing_fileQUALITY'. Ignoring."
@@ -612,20 +622,25 @@ duplicate_check() { local DECODED_FILENAME="$1";
 
 
 datenkeller_get() {
-  vrb "Downloading otr.datenkeller.net URLs (starting with '/?getFile='). Reading from stdin!"
+  vrb "Downloading otr.datenkeller.net FILENAMEs. Reading from stdin!"
   VRBPFX="$$|  >  "; DBGPFX="$$|  ~  "
 
   total_cnt=0; duplicate_skip_cnt=0; download_cnt=0;
-  while read line; do     total_cnt="$(( $total_cnt + 1 ))"
+  while read line; do
+    [ -n "$line" ] && total_cnt="$(( $total_cnt + 1 ))" || { dbg "IGNORED empty line (line count stays '$total_cnt')"; continue; }
+
     dbg "read line #$total_cnt: '$line'"
     case "$line" in
-      '/?getFile='*)                        url="$line";;
-      20[0-9][0-9]-[0][1-9]-[0-3][0-9]"	"*) url="$(echo "$line"|cut -f 8)";;
-      20[0-9][0-9]-[1][0-2]-[0-3][0-9]"	"*) url="$(echo "$line"|cut -f 8)";;
+      'https://otr.datenkeller.net/?getFile='*)  OTRKEY_FILENAME="$(echo "$line"|cut -c 38- )";;
+      'https://otr.datenkeller.net/queueForFile/'*)  OTRKEY_FILENAME="$(echo "$line"|cut -c 42- )";;
+      '/?getFile='*)                             OTRKEY_FILENAME="$(echo "$line"|cut -c 11- )";;
+      [a-zA-Z][a-zA-Z0-9_]*_TVOON_DE.*.otrkey)   OTRKEY_FILENAME="$line";;
       *) err 030 "line = '$line'";;
     esac
-    [ -z "$url" ] && err 031
-    OTRKEY_FILENAME="$(echo "$url"|sed -n 's|^/?getFile=||p')"; [ -z "$OTRKEY_FILENAME" ] && err 038
+      #20[0-9][0-9]-[0][1-9]-[0-3][0-9]"	"*)      url="$(echo "$line"|cut -f 8   )";;
+      #20[0-9][0-9]-[1][0-2]-[0-3][0-9]"	"*)      url="$(echo "$line"|cut -f 8   )";;
+
+    [ -z "$OTRKEY_FILENAME" ] && err 031
     DECODED_FILENAME="${OTRKEY_FILENAME%.*}"
     dbg "datenkeller_get(): OTRKEY_FILENAME = '$OTRKEY_FILENAME'"
     dbg "datenkeller_get(): DECODED_FILENAME = '$DECODED_FILENAME'"
@@ -640,9 +655,11 @@ datenkeller_get() {
        *) err 044;;
     esac
 
+    OTR_APIKEY_URLENCODED="$(urlencode "$DATENKELLER_APIKEY" )" || err 086 "urlencode \"$DATENKELLER_APIKEY\""
+
     ### STARTING DOWNLOAD:
 ###OLD:#     GETDLURL_URL="https://otr.datenkeller.net/index.php$url";
-    GETDLURL_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$(urlencode "$DATENKELLER_APIKEY" )&getLinkFor=$OTRKEY_FILENAME"
+    GETDLURL_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$OTR_APIKEY_URLENCODED&getLinkFor=$OTRKEY_FILENAME"
     dbg "datenkeller_get(): GETDLURL_URL = '$GETDLURL_URL'"
 
     ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
@@ -654,32 +671,11 @@ datenkeller_get() {
     dbg "datenkeller_get(): GET_DLURL_CMD outp = '$outp'"
     #
     DLURL="$(echo "$outp"|sed -n 's/^OK: //p')" || err 073 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
-    [ -z "$DLURL" ] && err 074 "ERROR: $cmdstr --> '$outp' --> DLURL='$DLURL' !?"
+    [ -z "$DLURL" ] && err 074 "ERROR: $cmdstr --> '$outp' --> DLURL='$DLURL' empty... but why !? -- DATENKELLER_APIKEY='$DATENKELLER_APIKEY', OTR_APIKEY_URLENCODED='$OTR_APIKEY_URLENCODED', c_python3='$c_python3'."
     dbg "datenkeller_get(): DLURL = '$DLURL'"
 
     datenkeller_dl "$DLURL" || err 082 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
     download_cnt="$(( $download_cnt + 1 ))";
-
-    continue
-
-###OLD:#     ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
-###OLD:#     curl $CURL_OPTS -X GET --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' -H 'sec-ch-ua: "Microsoft Edge";v="95", "Chromium";v="95", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Safari/537.36 Edg/95.0.1020.38' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' "$url" >"$TEMPFILE" || err 029
-###OLD:#     dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
-###OLD:#     local awk_outp_full="$("$GAWK_CMD" -v DBG=$DEEPDBG -f "$OUR_AWK_SCRIPT" "$TEMPFILE" get)" || err 032 "FAILED [$?]: \"$GAWK_CMD\" -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
-###OLD:#     [ -z "$awk_outp_full" ] && err 071 "FAILED [empty output]: \"$GAWK_CMD\" -v DBG=$DEEPDBG -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" get"
-###OLD:#     while read awk_outp; do
-###OLD:#       case "$awk_outp" in
-###OLD:#         "DBG:"*) dbg "[awk] $awk_outp";;
-###OLD:#         "") ddbg "datenkeller_get() Ignored empty line from awk_outp!";;
-###OLD:#         *) ddbg "datenkeller_get() -> datenkeller_dl \"$awk_outp\""
-###OLD:#            datenkeller_dl "$awk_outp" || err 033 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
-###OLD:#            download_cnt="$(( $download_cnt + 1 ))";;
-###OLD:#       esac
-###OLD:#       continue
-###OLD:#     done << EOL
-###OLD:# $awk_outp_full
-###OLD:# EOL
-
   done
 
   [ $(( $download_cnt + $duplicate_skip_cnt )) -eq $total_cnt ] || err 067 "We read '$total_cnt' lines from stdin. Skipped '$duplicate_skip_cnt' lines. Downloaded '$download_cnt' lines. This should ADD UP (total = skipped + downloaded), but it does not!"
@@ -767,18 +763,18 @@ tmp="$( "$GAWK_CMD" --version 2>&1 )" || err 084 "GAWK_CMD '$GAWK_CMD' not found
 FILTER_FIRST_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
 FILTER_TITLE="";
 FILTER_FROM_DATE="";
-FILTER_TIL_DATE="";
+FILTER_TILL_DATE="";
 
 # to filter AFTERWARDS on the results (via the awk script):
 FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
 FILTER_DESCRIPTION="";
 FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
 FILTER_FROM_TIME="";
-FILTER_TIL_TIME="";
+FILTER_TILL_TIME="";
 FILTER_WEEKDAYS=""; # used to collect @WEEKDAY (sep by SPACE)
 FILTER_DURATIONS=""; # used to collect @DURATION (sep by SPACE)
 FILTER_FROM_DURATION="";
-FILTER_TIL_DURATION="";
+FILTER_TILL_DURATION="";
 
 CMD=""; ignore_params=""; state=1;
 
@@ -794,14 +790,18 @@ while [ $# -gt 0 ]; do
     search|login|get) [ -n "$CMD" ] && err 060 "Only 1 CMD allowed. Call --help."; CMD="$arg"; continue;;
     dl|download|--dl|--download) [ -n "$CMD" ] && err 010 "Only 1 CMD allowed. Call --help."; CMD="dl"; continue;;
     decode|--decode) [ -n "$CMD" ] && err 008 "Only 1 CMD allowed. Call --help."; CMD="decode"; state=3; continue;;
+
+    *.[oO][tT][rR][kK][eE][yY]) [ -n "$CMD" -a "$CMD" != "decode" ] && err 085 "Only 1 CMD allowed. Call --help."; CMD="decode"; state=3;
+                                LAST_FILE="$arg"; FILES="$( append "$arg" to "$FILES" "$NL" )"; continue;;
+
     -*) err 020 "Invalid parameter '$arg'. Call --help.";;
 
     @[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
           [ -n "$FILTER_DATE" ] && err 046 "Only 1 @{date} filter allowed (already detected '$FILTER_DATE', now found '$arg'). Call --help.";
           FILTER_DATE="$( rmStart '@' "$arg" )"; continue;;
     "<"[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
-          [ -n "$FILTER_TIL_DATE" ] && err 023 "Only 1 <{date} filter allowed (already detected '$FILTER_TIL_DATE', now found '$arg'). Call --help.";
-          FILTER_TIL_DATE="$( rmStart '<' "$arg" )"; continue;;
+          [ -n "$FILTER_TILL_DATE" ] && err 023 "Only 1 <{date} filter allowed (already detected '$FILTER_TILL_DATE', now found '$arg'). Call --help.";
+          FILTER_TILL_DATE="$( rmStart '<' "$arg" )"; continue;;
     ">"[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
           [ -n "$FILTER_FROM_DATE" ] && err 024 "Only 1 >{date} filter allowed (already detected '$FILTER_FROM_DATE', now found '$arg'). Call --help.";
           FILTER_FROM_DATE="$( rmStart '>' "$arg" )"; continue;;
@@ -811,11 +811,11 @@ while [ $# -gt 0 ]; do
     @[0-9][0-9][:h])
           FILTER_TIMES="$( append "$(echo "$arg"|sed 's/[@]\(.*\)[:h]/\1/' )" to "$FILTER_TIMES" )"; continue;;
     "<"[0-9][0-9][:h])
-          FILTER_TIL_TIME="$( append "$(echo "$arg"|sed 's/[<]\(.*\)[:h]/\1/' )" to "$FILTER_TIL_TIME" )"; continue;;
+          FILTER_TILL_TIME="$( append "$(echo "$arg"|sed 's/[<]\(.*\)[:h]/\1/' )" to "$FILTER_TILL_TIME" )"; continue;;
     ">"[0-9][0-9][:h])
           FILTER_FROM_TIME="$( append "$(echo "$arg"|sed 's/[>]\(.*\)[:h]/\1/' )" to "$FILTER_FROM_TIME" )"; continue;;
     "<"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_TIL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" to "$FILTER_TIL_TIME" )"; continue;;
+          FILTER_TILL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" to "$FILTER_TILL_TIME" )"; continue;;
     ">"[0-9][0-9][h:-][0-9][0-9])
           FILTER_FROM_TIME="$( append "$(rmStart '>' "$arg"|tr 'h-' ':' )" to "$FILTER_FROM_TIME" )"; continue;;
 
@@ -825,8 +825,8 @@ while [ $# -gt 0 ]; do
     @[0-9][0-9])
           FILTER_DURATIONS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_DURATIONS" )"; continue;;
     "<"[0-9][0-9])
-          [ -n "$FILTER_TIL_DURATION" ] && err 059 "Only 1 <{duration} filter allowed. Call --help.";
-          FILTER_TIL_DURATION="$( rmStart '<' "$arg" )"; continue;;
+          [ -n "$FILTER_TILL_DURATION" ] && err 059 "Only 1 <{duration} filter allowed. Call --help.";
+          FILTER_TILL_DURATION="$( rmStart '<' "$arg" )"; continue;;
     ">"[0-9][0-9])
           [ -n "$FILTER_FROM_DURATION" ] && err 058 "Only 1 >{duration} filter allowed. Call --help.";
           FILTER_FROM_DURATION="$( rmStart '>' "$arg" )"; continue;;
@@ -867,22 +867,20 @@ if [ $LOG ]; then
   VRBPFX="$_vrbpfx"
 fi
 
-WD="$(pwd)"
 if [ $DBG ]; then
-  dbg "Working directory: '$WD'"
   dbg "FILTER_TITLE: '$FILTER_TITLE'"
   dbg "FILTER_DESCRIPTION: '$FILTER_DESCRIPTION'"
   dbg "FILTER_TIMES: '$FILTER_TIMES'"
   dbg "FILTER_FROM_TIME: '$FILTER_FROM_TIME'"
-  dbg "FILTER_TIL_TIME: '$FILTER_TIL_TIME'"
+  dbg "FILTER_TILL_TIME: '$FILTER_TILL_TIME'"
   dbg "FILTER_DATE: '$FILTER_DATE'"
   dbg "FILTER_FROM_DATE: '$FILTER_FROM_DATE'"
-  dbg "FILTER_TIL_DATE: '$FILTER_TIL_DATE'"
+  dbg "FILTER_TILL_DATE: '$FILTER_TILL_DATE'"
   dbg "FILTER_FIRST_CHANNEL: '$FILTER_FIRST_CHANNEL'"
   dbg "FILTER_REMAINING_CHANNELS: '$FILTER_REMAINING_CHANNELS'"
   dbg "FILTER_DURATIONS: '$FILTER_DURATIONS'"
   dbg "FILTER_FROM_DURATION: '$FILTER_FROM_DURATION'"
-  dbg "FILTER_TIL_DURATION: '$FILTER_TIL_DURATION'"
+  dbg "FILTER_TILL_DURATION: '$FILTER_TILL_DURATION'"
   dbg "FILTER_WEEKDAYS: '$FILTER_WEEKDAYS'"
   dbg "LAST_FILE: '$LAST_FILE'"
   dbg "FILES: '$FILES'"
@@ -890,12 +888,12 @@ if [ $DBG ]; then
 fi
 
 # CHECK COMMANDLINE PARAMETERS:
-#[ -n "$FILTER_FROM_DATE" -a -z "$FILTER_TIL_DATE" ] && err 027 "You provided >DATE without <DATE. Not possible. Call with --help."
-[ -z "$FILTER_FROM_DATE" -a -n "$FILTER_TIL_DATE" ] && err 028 "You provided <DATE without >DATE. Not possible. Call with --help."
-[ -n "$FILTER_DATE" -a -n "$FILTER_FROM_DATE$FILTER_TIL_DATE" ] && err 054 "You provided @DATE AND either <DATE or >DATE. Not possible. Call with --help."
+#[ -n "$FILTER_FROM_DATE" -a -z "$FILTER_TILL_DATE" ] && err 027 "You provided >DATE without <DATE. Not possible. Call with --help."
+[ -z "$FILTER_FROM_DATE" -a -n "$FILTER_TILL_DATE" ] && err 028 "You provided <DATE without >DATE. Not possible. Call with --help."
+[ -n "$FILTER_DATE" -a -n "$FILTER_FROM_DATE$FILTER_TILL_DATE" ] && err 054 "You provided @DATE AND either <DATE or >DATE. Not possible. Call with --help."
 if [ -n "$FILTER_DATE" ]; then
-  dbg "FILTER_DATE '$FILTER_DATE' provided --> setting FILTER_FROM_DATE + FILTER_TIL_DATE to FILTER_DATE."
-  FILTER_FROM_DATE="$FILTER_DATE" && FILTER_TIL_DATE="$FILTER_DATE"
+  dbg "FILTER_DATE '$FILTER_DATE' provided --> setting FILTER_FROM_DATE + FILTER_TILL_DATE to FILTER_DATE."
+  FILTER_FROM_DATE="$FILTER_DATE" && FILTER_TILL_DATE="$FILTER_DATE"
 fi
 case "$CMD" in
   "login"|"get"|"dl"|"decode") [ -n "$FILTER_TITLE" ] && err 016 "Invalid parameter '$FILTER_TITLE' for <COMMAND> '$CMD'. Call with --help.";
@@ -924,8 +922,8 @@ case "$CMD" in
   "login") datenkeller_login;;
   "search") datenkeller_search;;
   "decode") otr_decode;;
-  "dl") DO_OTR_DECODE_AFTER_DL=""; datenkeller_get;;
-  "get") DO_OTR_DECODE_AFTER_DL="1"; datenkeller_get;;
+  "dl") DO_OTR_DECODE_AFTER_DL=""; datenkeller_login; datenkeller_get;;
+  "get") DO_OTR_DECODE_AFTER_DL="1"; datenkeller_login; datenkeller_get;;
   *) err 011 "Unknown COMMAND '$CMD'. Should not be, contact author of this tool.";;
 esac
 
