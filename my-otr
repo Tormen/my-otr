@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# 086 == highest used errCode
+# 087 == highest used errCode
 
 US=${0##*/};   # get filename without path
 US_CALL="\"$0\""; for a in "$@"; do US_CALL="$US_CALL \"$a\""; done
@@ -126,7 +126,11 @@ get_decode_cmd() { # can use global variables: OTR_LOGIN, OTR_PASSW, OUTP_DIR, I
 # If there is no HQ but ONLY HD available the script will still download the HD version (!):
 #OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
 
-# Define download tool and the tool parameters; LAST parameter will be the URL to get the download URL from (will be parameter for OTR_DL_CMD):
+# Define the tool + parameters that query the otr.datenkeller.net API (SEARCH_CMD for search, GET_DLURL_CMD for the download URL).
+# The API URL carries your APIKEY, so it is NOT a parameter: it is fed on STDIN with wget'\''s --input-file=- (added by my-otr),
+# which keeps the key off the process list (ps). Both must therefore be wget-compatible.
+#SEARCH_CMD="wget"
+#SEARCH_CMD_PARAMS="--quiet --output-document=-"
 #GET_DLURL_CMD="wget"
 #GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
 
@@ -153,6 +157,7 @@ OPTIONS:
   -L  | --no-log       Prevent logging to LOGFILE '$LOGFILE'.
   --log-file FILE      Set LOGFILE to FILE.
   -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
+  --run-tests [FILTER] Run the built-in tests (those whose name contains FILTER); stubs only, no config needed.
 
 COMMAND can be:
   [--]help     shows this usage information
@@ -252,11 +257,26 @@ urlencode() {
   local old_wd="$(pwd)"
   dbg "urlencode(): old_wd='$old_wd', HOME='$HOME'"
   cd "$HOME"
-  dbg "urlencode(): echo '$1'|\"$c_python3\" -c \"import urllib.parse; print( urllib.parse.quote(input()) )\""
+  # the value is NOT printed: urlencode() also encodes the APIKEY
+  dbg "urlencode(): echo <value>|\"$c_python3\" -c \"import urllib.parse; print( urllib.parse.quote(input()) )\""
   echo "$1"|"$c_python3" -c "import urllib.parse; print( urllib.parse.quote(input()) )"; rc=$?;
   cd "$old_wd";
   dbg "urlencode(): rc='$rc'"
   return "$rc";
+}
+
+
+# usage: datenkeller_api <CMD> <CMD_PARAMS> <QUERY>  -- QUERY without account/apikey, e.g. "suche=foo&details"
+# Writes the answer to TEMPFILE; sets API_CMD_SHOWN (the command with the key as '***') for messages.
+# The URL carries the APIKEY, so it goes to CMD on STDIN (--input-file=-), never on its argv where
+# any user on the machine reads it with ps; 'printf' is the shell builtin here, so it has no argv either.
+DK_API_URL="https://otr.datenkeller.net/?jdlAPI"
+datenkeller_api() { local cmd="$1" params="$2" query="$3" key;
+  key="$( urlencode "$DATENKELLER_APIKEY" )" || err 086 "urlencode of DATENKELLER_APIKEY failed"
+  API_CMD_SHOWN="\"$cmd\" $params --input-file=- <<< '$DK_API_URL&account=$DATENKELLER_LOGIN&apikey=***&$query'"
+  dbg "datenkeller_api(): $API_CMD_SHOWN"
+  # shellcheck disable=SC2086  # $params is a list of options, split on purpose
+  printf '%s\n' "$DK_API_URL&account=$DATENKELLER_LOGIN&apikey=$key&$query" | "$cmd" $params --input-file=- >"$TEMPFILE"
 }
 
 
@@ -307,8 +327,11 @@ datenkeller_login() {
   curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X GET  -b "" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'sec-ch-ua-mobile: ?0' -H 'sec-ch-ua-platform: "macOS"' -H 'DNT: 1' -H 'Upgrade-Insecure-Requests: 1' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9' -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' -H 'Sec-Fetch-Dest: document' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' -d "" 'https://otr.datenkeller.net/' >/dev/null || err 021 "If you see this error, please check: Do you have internet ?"
 
   dbg "Logging into otr.datenkeller.net..."
-  # -H 'Content-Length: 134' 
-  curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X POST  -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Cache-Control: max-age=0' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' -d "xjxfun=spenderLogin&xjxr=$(get_xjxr)&xjxargs[]=S$DATENKELLER_LOGIN&xjxargs[]=S$DATENKELLER_PASSW&xjxargs[]=Se64182db4a8ab14dcaf986037092f6c0" 'https://otr.datenkeller.net/index.php' >/dev/null || err 022
+  # The body carries the password, so it goes to curl on STDIN (--data @-), never on its argv (ps).
+  # 'printf' is the shell builtin here, so it has no argv either.
+  # shellcheck disable=SC2086  # $CURL_OPTS is a list of options, split on purpose
+  printf '%s' "xjxfun=spenderLogin&xjxr=$(get_xjxr)&xjxargs[]=S$DATENKELLER_LOGIN&xjxargs[]=S$DATENKELLER_PASSW&xjxargs[]=Se64182db4a8ab14dcaf986037092f6c0" |
+  curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X POST  -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Cache-Control: max-age=0' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' --data @- 'https://otr.datenkeller.net/index.php' >/dev/null || err 022
 
   vrb "Logged in."
 
@@ -384,20 +407,21 @@ decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + upp
   fi
 
   cmd="$(get_decode_cmd)"
+  cmd_shown="$(OTR_PASSW='***'; get_decode_cmd)" # for messages: they reach the LOGFILE
 
   #ddbg "///////////////////////////////////////////////////////////";
-  ddbg "$cmd"
-  dbg "Decoding '$INP_FILE': eval '$cmd' 2>&1";
+  ddbg "$cmd_shown"
+  dbg "Decoding '$INP_FILE': eval '$cmd_shown' 2>&1";
   outp="$(eval "$cmd" 2>&1)"; rc=$?;
 
   if [ $rc -eq 0 ]; then
     ddbg "$outp"
     ddbg "SUCCESS. DECODED FILE WRITTEN TO: '$OUTP_DIR'\n"
   else
-    # err 050 "FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
+    # err 050 "FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd_shown':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
     echo;
     echo "WARNING !!!"
-    echo "WARNING: FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
+    echo "WARNING: FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd_shown':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
   fi
 
   return 0
@@ -459,20 +483,12 @@ datenkeller_search() {
   eko "Searching otr.datenkeller.net for \"$FILTER_TITLE\""
   dbg "search_str='$search_str'"
 
-  OTR_APIKEY_URLENCODED="$( urlencode "$DATENKELLER_APIKEY" )" || err 086 "urlencode \"$DATENKELLER_APIKEY\""
-
   ### STARTING SEARCH:
-  SEARCH_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$OTR_APIKEY_URLENCODED&suche=$search_str&details&limit=-1"
-  dbg "datenkeller_search(): SEARCH_URL = '$SEARCH_URL'"
-
-  cmdstr="\"$SEARCH_CMD\" $SEARCH_CMD_PARAMS \"$SEARCH_URL\""
-  dbg "SEARCH: SEARCH_CMD cmdstr = '$cmdstr'"
-  outp="$("$SEARCH_CMD" $SEARCH_CMD_PARAMS "$SEARCH_URL")" || err 072 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
+  datenkeller_api "$SEARCH_CMD" "$SEARCH_CMD_PARAMS" "suche=$search_str&details&limit=-1" || err 072 "ERROR: FAILED [$?]: $API_CMD_SHOWN --> '$(cat "$TEMPFILE")'"
+  outp="$(cat "$TEMPFILE")"
   dbg "datenkeller_search(): SEARCH_CMD outp = '$outp'"
-  #
 
-  [ -z "$outp" ] && err 083 "NO OUTPUT FROM: $cmdstr"
-  echo "$outp" >"$TEMPFILE"
+  [ -z "$outp" ] && err 083 "NO OUTPUT FROM: $API_CMD_SHOWN"
 
   dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -v FROM_DATE=\"$FILTER_FROM_DATE\" -v TILL_DATE=\"$FILTER_TILL_DATE\" -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TILL_TIME=\"$FILTER_TILL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TILL_DURATION=\"$FILTER_TILL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
 
@@ -655,23 +671,15 @@ datenkeller_get() {
        *) err 044;;
     esac
 
-    OTR_APIKEY_URLENCODED="$(urlencode "$DATENKELLER_APIKEY" )" || err 086 "urlencode \"$DATENKELLER_APIKEY\""
-
-    ### STARTING DOWNLOAD:
-###OLD:#     GETDLURL_URL="https://otr.datenkeller.net/index.php$url";
-    GETDLURL_URL="https://otr.datenkeller.net/?jdlAPI&account=$DATENKELLER_LOGIN&apikey=$OTR_APIKEY_URLENCODED&getLinkFor=$OTRKEY_FILENAME"
-    dbg "datenkeller_get(): GETDLURL_URL = '$GETDLURL_URL'"
-
     ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
     [ -x "$OTR_DL_CMD" ] || err 003 "OTR_DL_CMD '$OTR_DL_CMD' not found."
-    VRBPFX="$$| >>> "; vrb "Downloading '$GETDLURL_URL'..."; # we do NOT reset VRBPFX here, because we will next call datenkeller_dl() !
-    cmdstr="\"$GET_DLURL_CMD\" $GET_DLURL_CMD_PARAMS \"$GETDLURL_URL\""
-    dbg "GET_DL_CMD: GET_DLURL_CMD cmdstr = '$cmdstr'"
-    outp="$("$GET_DLURL_CMD" $GET_DLURL_CMD_PARAMS "$GETDLURL_URL")" || err 072 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
+    VRBPFX="$$| >>> "; vrb "Getting the download link for '$OTRKEY_FILENAME'..."; # we do NOT reset VRBPFX here, because we will next call datenkeller_dl() !
+    datenkeller_api "$GET_DLURL_CMD" "$GET_DLURL_CMD_PARAMS" "getLinkFor=$OTRKEY_FILENAME" || err 087 "ERROR: FAILED [$?]: $API_CMD_SHOWN --> '$(cat "$TEMPFILE")'"
+    outp="$(cat "$TEMPFILE")"
     dbg "datenkeller_get(): GET_DLURL_CMD outp = '$outp'"
     #
-    DLURL="$(echo "$outp"|sed -n 's/^OK: //p')" || err 073 "ERROR: FAILED [$?]: $cmdstr --> '$outp'"
-    [ -z "$DLURL" ] && err 074 "ERROR: $cmdstr --> '$outp' --> DLURL='$DLURL' empty... but why !? -- DATENKELLER_APIKEY='$DATENKELLER_APIKEY', OTR_APIKEY_URLENCODED='$OTR_APIKEY_URLENCODED', c_python3='$c_python3'."
+    DLURL="$(echo "$outp"|sed -n 's/^OK: //p')" || err 073 "ERROR: FAILED [$?]: $API_CMD_SHOWN --> '$outp'"
+    [ -z "$DLURL" ] && err 074 "ERROR: $API_CMD_SHOWN --> '$outp' --> DLURL='$DLURL' empty... but why !? -- c_python3='$c_python3'."
     dbg "datenkeller_get(): DLURL = '$DLURL'"
 
     datenkeller_dl "$DLURL" || err 082 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
@@ -700,7 +708,114 @@ get_xjxr() { r=$RANDOM; [ -z "$r" ] && r=0; date +"%s$(printf "%03d" "$(( $r % 1
 
 
 #########################################################
+#### TESTS:  my-otr --run-tests [FILTER]   (TAP: the plan "1..N" first, then "ok K - name" / "not ok K - name")
+# Every network tool is a STUB that records its argv and stdin; fake secrets, no config, nothing leaves the machine.
+
+RT_TESTS="t_search_key_off_argv t_get_key_off_argv t_login_passw_off_argv t_messages_hide_secrets t_api_url_built_once"
+RT_KEY='K3y+S/ecr=t'      # urlencode changes it, so the raw AND the encoded form are checked
+RT_KEY_ENC='K3y%2BS/ecr%3Dt'
+RT_PASSW='Pa55-w0rd'
+
+# shellcheck disable=SC2016  # the stubs' own $@, $(...) and ${a}, not ours
+rt_setup() {
+  RT_DIR="$(mktemp -d /tmp/my-otr-tests.XXXXXX)" || { echo "Bail out! mktemp failed"; exit 1; }
+  for _rs in wget curl; do
+    printf '#!/bin/sh\nprintf "%%s\\n" "$@" >>"%s/%s.argv"; cat >>"%s/%s.stdin"; cat "%s/%s.answer" 2>/dev/null; exit $(cat "%s/%s.rc" 2>/dev/null || echo 0)\n' \
+      "$RT_DIR" "$_rs" "$RT_DIR" "$_rs" "$RT_DIR" "$_rs" "$RT_DIR" "$_rs" >"$RT_DIR/$_rs"
+  done
+  printf '#!/bin/sh\necho hit\n' >"$RT_DIR/gawk"
+  printf '#!/bin/sh\nfor a; do :; done; echo data >"${a##*/}"\n' >"$RT_DIR/aria2c"
+  printf '#!/bin/sh\necho "otrtool: wrong password"; exit 3\n' >"$RT_DIR/otrtool"
+  chmod 755 "$RT_DIR/wget" "$RT_DIR/curl" "$RT_DIR/gawk" "$RT_DIR/aria2c" "$RT_DIR/otrtool"
+  : >"$RT_DIR/wget.argv"; : >"$RT_DIR/curl.argv"
+}
+
+# run "$@" as my-otr would, all messages on (-V -D -DD), in a subshell (err exits); its stderr is what the LOGFILE gets
+rt_run() {
+  ( cd "$RT_DIR" || exit 1
+    PATH="$RT_DIR:$PATH"; QUIET=; VRB=1; DBG=1; DEEPDBG=1; LOG=; LOG_ERR_TO_SYSLOG=; FORCE=
+    DATENKELLER_LOGIN=tester; DATENKELLER_APIKEY="$RT_KEY"; DATENKELLER_PASSW="$RT_PASSW"; OTR_LOGIN=tester; OTR_PASSW="$RT_PASSW"
+    SEARCH_CMD="$RT_DIR/wget"; GET_DLURL_CMD="$RT_DIR/wget"; GAWK_CMD="$RT_DIR/gawk"; OTR_DL_CMD="$RT_DIR/aria2c"
+    TEMPFILE="$RT_DIR/tmp"; COOKIE_FILE="$RT_DIR/cookies"; FILTER_TITLE="bares fuer rares"; OUR_AWK_SCRIPT=/dev/null
+    "$@" ) >"$RT_DIR/out" 2>&1
+}
+
+# rt_has|rt_lacks FILE STRING WHAT
+rt_has()   { grep -qF -- "$2" "$1" 2>/dev/null || { echo "#   missing in ${1##*/}: $3"; RT_FAIL=1; }; }
+rt_lacks() { grep -qF -- "$2" "$1" 2>/dev/null && { echo "#   FOUND in ${1##*/}: $3"; RT_FAIL=1; }; return 0; }
+rt_no_key() { rt_lacks "$1" "$RT_KEY" "the API key"; rt_lacks "$1" "$RT_KEY_ENC" "the API key (urlencoded)"; }
+
+t_search_key_off_argv() {
+  echo row >"$RT_DIR/wget.answer"
+  rt_run datenkeller_search
+  rt_has "$RT_DIR/out" "Found 1 hits." "the search result"
+  rt_has "$RT_DIR/wget.argv" "--input-file=-" "wget's --input-file=-"
+  rt_no_key "$RT_DIR/wget.argv"
+  rt_has "$RT_DIR/wget.stdin" "apikey=$RT_KEY_ENC&suche=bares%20fuer%20rares" "the key, sent on stdin"
+  rt_no_key "$RT_DIR/out"
+}
+
+t_get_key_off_argv() {
+  printf 'OK: https://dl.invalid/Foo_TVOON_DE.mpg.HQ.avi.otrkey\n' >"$RT_DIR/wget.answer"
+  split_filenameBase() { echo x; }; get_alternate_local_filenames() { return 0; }
+  rt_run datenkeller_get <<EOF
+Foo_TVOON_DE.mpg.HQ.avi.otrkey
+EOF
+  rt_has "$RT_DIR/out" "1 downloaded" "the download"
+  rt_no_key "$RT_DIR/wget.argv"
+  rt_has "$RT_DIR/wget.stdin" "apikey=$RT_KEY_ENC&getLinkFor=Foo_TVOON_DE.mpg.HQ.avi.otrkey" "the key, sent on stdin"
+  rt_no_key "$RT_DIR/out"
+}
+
+t_login_passw_off_argv() {
+  rt_run datenkeller_login
+  rt_has "$RT_DIR/out" "Logged in." "the login"
+  rt_lacks "$RT_DIR/curl.argv" "$RT_PASSW" "the password"
+  rt_has "$RT_DIR/curl.stdin" "xjxargs[]=S$RT_PASSW" "the password, sent on stdin"
+}
+
+# a FAILING api call and a failing decode print their command: neither may carry a secret
+t_messages_hide_secrets() {
+  echo 8 >"$RT_DIR/wget.rc"
+  rt_run datenkeller_search
+  rt_has "$RT_DIR/out" "ERROR 072" "the error"
+  rt_has "$RT_DIR/out" "apikey=***" "the redacted key"
+  rt_no_key "$RT_DIR/out"
+  echo x >"$RT_DIR/a.otrkey"
+  eval "$(echo "$EXAMPLE_CONF" | sed -n "/^get_decode_cmd()/,/^}/p")"   # the decode command the shipped config defines
+  rt_run decode_one_file a.otrkey .
+  rt_has "$RT_DIR/out" "otrtool: wrong password" "the decode failure"
+  rt_lacks "$RT_DIR/out" "$RT_PASSW" "the OTR password"
+}
+
+# only datenkeller_api() may put the key into a URL: a second place would bypass it
+t_api_url_built_once() {
+  _n="$(awk '/^#### TESTS:/ { exit } /apikey=[$]/ { n++ } END { print n+0 }' "$0")"
+  [ "$_n" = "1" ] || { echo "#   'apikey=\$' found on $_n lines of the code, expected 1 (datenkeller_api)"; RT_FAIL=1; }
+}
+
+run_tests() { _rt_filter="$1"; _rt_list=""; _rt_n=0; _rt_k=0; _rt_bad=0
+  _rt_defs="$(grep -c '^t_[a-z_]*() {' "$0")"
+  # shellcheck disable=SC2086  # split into words on purpose
+  set -- $RT_TESTS
+  [ "$_rt_defs" = "$#" ] || { echo "Bail out! $_rt_defs test functions defined, $# in RT_TESTS"; return 1; }
+  for _rt_t in $RT_TESTS; do case "$_rt_t" in *"$_rt_filter"*) _rt_list="$_rt_list $_rt_t"; _rt_n=$((_rt_n + 1));; esac; done
+  trap 'rm -rf "$RT_DIR"; exit 130' INT TERM HUP
+  echo "1..$_rt_n"
+  for _rt_t in $_rt_list; do
+    _rt_k=$((_rt_k + 1)); RT_FAIL=; rt_setup
+    "$_rt_t" </dev/null   # a stub reads stdin: never let it wait on a terminal
+    if [ -z "$RT_FAIL" ]; then echo "ok $_rt_k - $_rt_t"; else echo "not ok $_rt_k - $_rt_t"; _rt_bad=$((_rt_bad + 1)); fi
+    rm -rf "$RT_DIR"
+  done
+  [ "$_rt_bad" -eq 0 ]
+}
+
+
+#########################################################
 #### MAIN:
+
+[ "$1" = "--run-tests" ] && { run_tests "$2"; exit $?; }
 
 FORCED_CONF_FILE=""
 FORCED_LOGFILE=""
