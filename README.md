@@ -43,27 +43,28 @@ Otherwise you first need to:
 Usage
 -----
 
-    usage: my-otr/my-otr [OPTIONS] <COMMAND> [[PARAM] [..]]
+    usage: my-otr [OPTIONS] <COMMAND> [[PARAM] [..]]
     
     OPTIONS:
-      -C  | --conf [FILE]  If FILE is provided: Use FILE as config file (instead of '/Users/me/.my-otr.conf').
+      -C  | --conf [FILE]  If FILE is provided: Use FILE as config file (instead of '~/.my-otr.conf').
                            If called WITHOUT FILE this will print the DEFAULT CONFIG.
                            You can use this to create your default config file:
-                             my-otr --conf > "/Users/me/.my-otr.conf"
+                             my-otr --conf > "~/.my-otr.conf"
       -Q  | --quiet        Supress any regular status output of the script (search results will still be printed). Independent of VERBOSE and DEBUG !
       -V  | --verbose      Turn VERBOSE output ON.
       -D  | --debug        Turn DEBUG output ON.
       -DD | --deep-debug   Turn DEBUG for subcommands ON called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
                            Independent of regular debug output (--debug).
-      -l  | --log          Turn LOGGING of any output (verbose, debug, deep-debug) ON. Logs to LOGFILE '/var/log/mine/me/my-otr.log' by default.
-      -L  | --no-log       Prevent logging to LOGFILE '/var/log/mine/me/my-otr.log'.
+      -l  | --log          Turn LOGGING of any output (verbose, debug, deep-debug) ON. Logs to LOGFILE '~/.my-otr.log' by default.
+      -L  | --no-log       Prevent logging to LOGFILE '~/.my-otr.log'.
       --log-file FILE      Set LOGFILE to FILE.
       -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
+      --run-tests [FILTER] Run the built-in tests (those whose name contains FILTER); stubs only, no config needed.
     
     COMMAND can be:
       [--]help     shows this usage information
     
-      [--]decode   <OTRFILE> [<OTRFILE> [..]] [<OUTPUT-DIR> defaults to /dl/,tv]
+      [--]decode   <OTRFILE> [<OTRFILE> [..]] [<OUTPUT-DIR> defaults to ]
                    <OTRFILE> can be '-', then the OTRFILE(s) are read from stdin !
                    The script will stop decoding and quit on errors.
                    <OUTPUT-DIR> needs to be a directory that exists.
@@ -71,8 +72,8 @@ Usage
     
       [--]login    <<< will NOT re-loging if cookie file found; except if FORCE is used <<< #TODO# automatically re-login in case cookie is not valid anymore
     
-      [--]search   <<< allow filtering via additional parameters: 
-                       MANDATORY parameter: 
+      [--]search   <<< allow filtering via additional parameters:
+                       MANDATORY parameter:
                            TITLE SEARCH TEXT <<< text to search for in titles (this is what you would type into searchbox on otr.datenkeller.net!)
                                              <<< will STOP to take parameters as TITLE-SEARCH-TEXT when a ',' is found!
                        OPTIONAL parameters: All parameters starting with '@' can be provided multiple times!
@@ -99,7 +100,7 @@ Usage
     
     SOME DEFAULT VALUES FROM CONFIG FILE:
       QUIET   = '' <<< if QUIET is set (so != ''), then by default this script will supress any regular status output (search results will still be printed) 
-      LOG     = '1' <<< if LOG is set (so != ''), then by default this script will redirect all output to this LOGFILE '/var/log/mine/me/my-otr.log'! (see --no-log above)
+      LOG     = '1' <<< if LOG is set (so != ''), then by default this script will redirect all output to this LOGFILE '~/.my-otr.log'! (see --no-log above)
       VRB     = '' <<< if VRB is set (so != ''), then by default this script will print VERBOSE output (see --verbose above)
       DBG     = '' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --debug above)
       DEEPDBG = '' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --deep-debug above)
