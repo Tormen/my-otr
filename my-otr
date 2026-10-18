@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# 087 == highest used errCode
+# 088 == highest used errCode
 
 US=${0##*/};   # get filename without path
 US_CALL="\"$0\""; for a in "$@"; do US_CALL="$US_CALL \"$a\""; done
@@ -378,6 +378,7 @@ datenkeller_login() {
 #See otrtool(1) for further information
 #
 decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + uppercase for get_decode_cmd() !
+  case "$INP_FILE" in *.otr2) err 088 "'$INP_FILE' is an .otr2 -- OTR's new format (2026); the decode command (otrtool) reads .otrkey only. OTR's own decoder reads both: https://www.onlinetvrecorder.com/v2/software";; esac
   DBGPFX="$DEFAULT_DBGPFX";
   dbg "decode_one_file(): INP_FILE='$INP_FILE' OUTP_DIR='$OUTP_DIR'"
   DBGPFX="$$|  ~  "
@@ -532,6 +533,12 @@ datenkeller_dl() { local url="$1";
   "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$url" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$url\""
   [ -s "$OTRKEY_FILENAME" ] || err 035
 
+  # an .otr2 (OTR's format since 2026) is KEPT as it is: the decode command
+  # (otrtool) reads .otrkey only -- said, never attempted
+  case "$OTRKEY_FILENAME" in *.otr2)
+    eko "Kept '$OTRKEY_FILENAME' as it is: an .otr2 -- no decoder for it here yet (otrtool reads .otrkey only)"
+    return 0;; esac
+
   [ $DO_OTR_DECODE_AFTER_DL ] || return 0
 
   ### DO THE DECODING:
@@ -651,6 +658,7 @@ datenkeller_get() {
       'https://otr.datenkeller.net/queueForFile/'*)  OTRKEY_FILENAME="$(echo "$line"|cut -c 42- )";;
       '/?getFile='*)                             OTRKEY_FILENAME="$(echo "$line"|cut -c 11- )";;
       [a-zA-Z][a-zA-Z0-9_]*_TVOON_DE.*.otrkey)   OTRKEY_FILENAME="$line";;
+      [a-zA-Z][a-zA-Z0-9_]*_TVOON_DE.*.otr2)     OTRKEY_FILENAME="$line";;
       *) err 030 "line = '$line'";;
     esac
       #20[0-9][0-9]-[0][1-9]-[0-3][0-9]"	"*)      url="$(echo "$line"|cut -f 8   )";;
@@ -661,8 +669,19 @@ datenkeller_get() {
     dbg "datenkeller_get(): OTRKEY_FILENAME = '$OTRKEY_FILENAME'"
     dbg "datenkeller_get(): DECODED_FILENAME = '$DECODED_FILENAME'"
 
-    dbg "datenkeller_get(): CALLING duplicate_check '$DECODED_FILENAME'..."
-    duplicate_check "$DECODED_FILENAME"; rc=$?; # returns 1 if DUPLICATE was found !
+    case "$OTRKEY_FILENAME" in
+      *.otr2)
+        # kept undecoded (see datenkeller_dl): the .otr2 itself is the result, so ANY
+        # quality of this recording already here, complete, makes this one a duplicate --
+        # one aria2c has not finished (its .aria2 beside it) is resumed, not skipped
+        rc=0; _o2_base="${OTRKEY_FILENAME%_TVOON_DE.*}_TVOON_DE."
+        for _o2 in "$_o2_base"*.otr2; do
+          [ -f "$_o2" ] && [ ! -e "$_o2.aria2" ] && [ -z "$FORCE" ] && { rc=1; vrb "'$_o2' is here already (an .otr2 of this recording). Ignoring."; break; }
+        done;;
+      *)
+        dbg "datenkeller_get(): CALLING duplicate_check '$DECODED_FILENAME'..."
+        duplicate_check "$DECODED_FILENAME"; rc=$?;; # returns 1 if DUPLICATE was found !
+    esac
     case "$rc" in
        1) duplicate_skip_cnt="$(( $duplicate_skip_cnt + 1 ))";
           dbg "datenkeller_get(): duplicate_check on DECODED_FILENAME: YES, we have a duplicate! -->> SKIPPING ($duplicate_skip_cnt. time)!"
@@ -711,7 +730,7 @@ get_xjxr() { r=$RANDOM; [ -z "$r" ] && r=0; date +"%s$(printf "%03d" "$(( $r % 1
 #### TESTS:  my-otr --run-tests [FILTER]   (TAP: the plan "1..N" first, then "ok K - name" / "not ok K - name")
 # Every network tool is a STUB that records its argv and stdin; fake secrets, no config, nothing leaves the machine.
 
-RT_TESTS="t_search_key_off_argv t_get_key_off_argv t_login_passw_off_argv t_messages_hide_secrets t_api_url_built_once"
+RT_TESTS="t_search_key_off_argv t_get_key_off_argv t_login_passw_off_argv t_messages_hide_secrets t_api_url_built_once t_otr2_kept t_otr2_duplicate t_otr2_awk"
 RT_KEY='K3y+S/ecr=t'      # urlencode changes it, so the raw AND the encoded form are checked
 RT_KEY_ENC='K3y%2BS/ecr%3Dt'
 RT_PASSW='Pa55-w0rd'
@@ -794,8 +813,51 @@ t_api_url_built_once() {
   [ "$_n" = "1" ] || { echo "#   'apikey=\$' found on $_n lines of the code, expected 1 (datenkeller_api)"; RT_FAIL=1; }
 }
 
+# an .otr2 is downloaded and KEPT: never handed to the decode command (otrtool reads .otrkey only)
+t_otr2_kept() {
+  printf 'OK: https://dl.invalid/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2\n' >"$RT_DIR/wget.answer"
+  DO_OTR_DECODE_AFTER_DL=1 rt_run datenkeller_get <<EOF
+Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2
+EOF
+  rt_has "$RT_DIR/out" "1 downloaded" "the download"
+  rt_has "$RT_DIR/out" "Kept 'Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2' as it is" "the file kept, said"
+  rt_lacks "$RT_DIR/out" "otrtool: wrong password" "a decode attempt (the otrtool stub's answer)"
+  [ -s "$RT_DIR/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2" ] || { echo "#   the .otr2 is not there"; RT_FAIL=1; }
+  echo x >"$RT_DIR/b.otr2"
+  rt_run decode_one_file b.otr2 .
+  rt_has "$RT_DIR/out" "ERROR 088" "--decode of an .otr2: refused, with the reason"
+}
+
+# any quality of a recording already here (complete) is a duplicate; an unfinished one is resumed
+t_otr2_duplicate() {
+  printf 'OK: https://dl.invalid/Foo_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2\n' >"$RT_DIR/wget.answer"
+  echo data >"$RT_DIR/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2"
+  rt_run datenkeller_get <<EOF
+Foo_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2
+EOF
+  rt_has "$RT_DIR/out" "1 skipped, 0 downloaded" "another quality of it, here already: skipped"
+  echo x >"$RT_DIR/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2.aria2"
+  rt_run datenkeller_get <<EOF
+Foo_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2
+EOF
+  rt_has "$RT_DIR/out" "0 skipped, 1 downloaded" "the one here unfinished (.aria2 beside it): not a duplicate"
+}
+
+# the search awk: .otr2 names parsed, the best quality per recording picked, an add-on never offered
+t_otr2_awk() {
+  _awk="${0%/*}/my-otr.awk"; [ -r "$_awk" ] || { echo "#   no my-otr.awk beside $0"; RT_FAIL=1; return; }
+  command -v gawk >/dev/null 2>&1 || { echo "# SKIP: no gawk on this machine"; return; }
+  printf '%s\n' 'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2;400' 'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2;900' \
+    'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HD.otr2;2000' 'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.mpg.AddOn.otr2;50' \
+    'B__Folge_2_26.10.06_22-15_zdf_45_TVOON_DE.LQ.otr2;300' 'C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey;200' \
+    'D__Folge_3_26.10.07_20-15_zdf_60_TVOON_DE.mpg.AddOn.otr2;50' >"$RT_DIR/in"   # D: an add-on only -- nothing to offer
+  gawk -v DBG= -f "$_awk" "$RT_DIR/in" search >"$RT_DIR/out" 2>&1
+  [ "$(sort "$RT_DIR/out" | tr '\n' ' ')" = "A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2 B__Folge_2_26.10.06_22-15_zdf_45_TVOON_DE.LQ.otr2 C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey " ] \
+    || { echo "#   the search picked: $(tr '\n' ' ' <"$RT_DIR/out")"; RT_FAIL=1; }
+}
+
 run_tests() { _rt_filter="$1"; _rt_list=""; _rt_n=0; _rt_k=0; _rt_bad=0
-  _rt_defs="$(grep -c '^t_[a-z_]*() {' "$0")"
+  _rt_defs="$(grep -c '^t_[a-z0-9_]*() {' "$0")"   # a digit in a name (t_otr2_...) counts too
   # shellcheck disable=SC2086  # split into words on purpose
   set -- $RT_TESTS
   [ "$_rt_defs" = "$#" ] || { echo "Bail out! $_rt_defs test functions defined, $# in RT_TESTS"; return 1; }

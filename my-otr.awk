@@ -99,6 +99,7 @@ function select_quality(_res) {
   if ("HQ"     in RES_BY_RECORDING_AND_QUALITY[_res]) { return "HQ"; }
   if ("MP4"    in RES_BY_RECORDING_AND_QUALITY[_res]) { return "MP4"; }
   if ("DivX"   in RES_BY_RECORDING_AND_QUALITY[_res]) { return "DivX"; }
+  if ("LQ"     in RES_BY_RECORDING_AND_QUALITY[_res]) { return "LQ"; }
   if ("HD"     in RES_BY_RECORDING_AND_QUALITY[_res]) { return "HD"; }
   if ("AC3"    in RES_BY_RECORDING_AND_QUALITY[_res]) { return "AC3"; }
 
@@ -149,9 +150,10 @@ function do_search(_filename,_filesize,    _suffix,_quality,_duration,_channel,_
 
   _n=split(_filename,_a,/[_]/); if (_n<7) err(1034, "_filename = '"_filename"' split by '_' --> n="_n" parts, but expected at least 7 !?");
 
-  # extract _suffix:
+  # extract _suffix: .otrkey (until 2026) or .otr2 (OTR's new format, seen from 2026-09)
+  # EXAMPLE .otr2: Bares_fuer_Rares__Folge_2134_26.10.05_19-20_zdfneo_55_TVOON_DE.LQ.otr2
   _suffix=_a[_n];
-  if (sub(/[.]otrkey$/,"",_suffix) == 0) err(1031, "_suffix='"_suffix"' _filename='"_filename"'")
+  if (sub(/[.]otrkey$/,"",_suffix) == 0 && sub(/[.]otr2$/,"",_suffix) == 0) err(1031, "_suffix='"_suffix"' _filename='"_filename"'")
   if (sub(/^DE[.]/,"",_suffix) == 0) err(1003, "_suffix='"_suffix"', _filename='"_filename"'") 
   # check _suffix ++ determine _quality
   switch (tolower(_suffix)) {
@@ -160,6 +162,12 @@ function do_search(_filename,_filesize,    _suffix,_quality,_duration,_channel,_
     case "mpg.hq.avi": _quality="HQ"; break;
     case "mpg.avi":    _quality="DivX"; break;
     case "mpg.mp4":    _quality="MP4"; break;
+    case "hq":         _quality="HQ"; break;   # .otr2
+    case "hd":         _quality="HD"; break;   # .otr2
+    case "lq":         _quality="LQ"; break;   # .otr2
+    case "mpg.addon":  # .otr2: an ADD-ON to a recording, not a recording -- never offered
+      if (DBG) printf(DBGPFX"\t--> skipped: an add-on, not a recording: '%s'\n", _filename) > "/dev/stderr";
+      return;
     default: err(1032, "UNKNOWN SUFFIX ("_suffix"). _filename'"_filename"'");
   }
   if (DEEPDBG) printf(ALLOWED_DATES_ARRDBGPFX" --> _suffix='%s', _quality='%s', _filename='%s'\n", _suffix, _quality, _filename) > "/dev/stderr";
