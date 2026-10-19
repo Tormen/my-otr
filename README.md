@@ -1,119 +1,97 @@
+my-otr
+======
 
-my-otr Shell Script
-===================
+The missing command-line tool for otr.datenkeller.net and onlinetvrecorder.com:
+search with better filters than the website, download, and decode -- all of it
+scriptable, e.g. to fetch the new episodes of your shows every night.
 
-The missing command-line tool for otr.datenkeller.net!
+- `search`: the best file of each recording, filtered by channel, day, weekday,
+  start time and duration.
+- `get`: downloads the names `search` printed, skips a recording already here in
+  an equal or better quality, and decodes what it fetched.
+- Decodes both of OTR's formats itself: `.otr2` (since 2026) and `.otrkey`
+  (before). The decoded file keeps OTR's name with its container's extension
+  (`..._TVOON_DE.HQ.mp4`), is checked against the checksum OTR sends, and stays
+  byte for byte the recording: my-otr adds no watermark.
 
-Finally! :)
-
-Useful:
-- to automate usage of otr.datenkeller.net, e.g. to be able to programm recordings of your favorite shows via a cron job :)
-- because it provides much better filtering than the website!
-
-Tested on MacOS and Linux
+Written from OTR's own CLI decoder (which states no licence, so none of its code
+is in here): `my-otr update-check <ZIP>` lists what a new release of it changed
+in the protocol.
 
 
 Dependencies
 ------------
 
-- Shell (script is /bin/dash compatible, so only uses POSIX shell features)
-- awk
-- Some otr decode tool (if you want to decode ;))
-  - [otrtool](https://github.com/otrtool/otrtool): Runs under Linux + MacOS
-  - [otrdecoder ("Decoder"/"Dekoder")](https://www.onlinetvrecorder.com/v2/software/): Runs under Linux + MacOS
-- wget and aria2c or curl
+- Python 3.9 or newer
+- [cryptography](https://pypi.org/project/cryptography/) -- my-otr installs it
+  itself on first use, into its own environment `~/.python.venv/my-otr`
+- [aria2c](https://aria2.github.io/) for the downloads
 
 
 Install
 -------
 
-Copy my-otr somewhere. Run it. It'll guide you ;)
-
-Otherwise you first need to:
-- install `my-otr` somewhere
-- run `my-otr --conf >~/.my-otr.conf` to create your CONFIG FILE
-- edit the CONFIG FILE:
-  - #Mandatory# Enter your credentials for https://otr.datenkeller.net
-  - #Optionally# if you want to DECODE:
-    - Enter credentials for for https://www.onlinetvrecorder.com
-    - Adapt "get_decode_cmd()" in the CONFIG FILE (especially if you don't want to use otrtool !)
-- place my-otr.awk somewhere (e.g. ~/.my-otr.awk /or/ BESIDE my-otr /or/ edit OUR_AWK_SCRIPT variable in the CONFIG FILE.
+- put `my-otr` somewhere in your PATH
+- `my-otr --create-config ~/.my-otr.conf`, then enter your credentials for
+  https://otr.datenkeller.net and https://www.onlinetvrecorder.com in it
+- `my-otr --run-tests` to see it work here
 
 
 Usage
 -----
 
-    usage: my-otr [OPTIONS] <COMMAND> [[PARAM] [..]]
-    
-    OPTIONS:
-      -C  | --conf [FILE]  If FILE is provided: Use FILE as config file (instead of '~/.my-otr.conf').
-                           If called WITHOUT FILE this will print the DEFAULT CONFIG.
-                           You can use this to create your default config file:
-                             my-otr --conf > "~/.my-otr.conf"
-      -Q  | --quiet        Supress any regular status output of the script (search results will still be printed). Independent of VERBOSE and DEBUG !
-      -V  | --verbose      Turn VERBOSE output ON.
-      -D  | --debug        Turn DEBUG output ON.
-      -DD | --deep-debug   Turn DEBUG for subcommands ON called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
-                           Independent of regular debug output (--debug).
-      -l  | --log          Turn LOGGING of any output (verbose, debug, deep-debug) ON. Logs to LOGFILE '~/.my-otr.log' by default.
-      -L  | --no-log       Prevent logging to LOGFILE '~/.my-otr.log'.
-      --log-file FILE      Set LOGFILE to FILE.
-      -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
-      --run-tests [FILTER] Run the built-in tests (those whose name contains FILTER); stubs only, no config needed.
-    
-    COMMAND can be:
-      [--]help     shows this usage information
-    
-      [--]decode   <OTRFILE> [<OTRFILE> [..]] [<OUTPUT-DIR> defaults to ]
-                   <OTRFILE> can be '-', then the OTRFILE(s) are read from stdin !
-                   The script will stop decoding and quit on errors.
-                   <OUTPUT-DIR> needs to be a directory that exists.
-                   This command is by default SILENT. Use --verbose to see decoded filenames.
-    
-      [--]login    <<< will NOT re-loging if cookie file found; except if FORCE is used <<< #TODO# automatically re-login in case cookie is not valid anymore
-    
-      [--]search   <<< allow filtering via additional parameters:
-                       MANDATORY parameter:
-                           TITLE SEARCH TEXT <<< text to search for in titles (this is what you would type into searchbox on otr.datenkeller.net!)
-                                             <<< will STOP to take parameters as TITLE-SEARCH-TEXT when a ',' is found!
-                       OPTIONAL parameters: All parameters starting with '@' can be provided multiple times!
-                           DESCRIPTION SEARCH TEXT <<< OPTIONAL 2nd text parameter; this will be used to search in the description <<< NOT YET IMPLEMENTED !!! #TODO#
-                           @channel <<< search only in provided channel name (channel name must match otr.datenkeller.net)
-                           '>date' <<< search only for shows AFTER (or ON; so including) a given date; in format: 2021-11-24
-                           '<date' <<< search only for shows UP TO (or ON; so including) a given date; in format: 2021-11-24
-                           '@date' <<< search only for shows AT a given date; in format: 2021-11-24
-                           '@HH:' or '@HHh' or '@HH:MM' <<< e.g. "@20h" search only for shows STARTING AT the provided time
-                           '>HH:' or '>HHh' or '>HH:MM' <<< e.g. ">20h" search only for shows STARTING AFTER (or ON; so including) the provided time
-                           '<HH:' or '<HHh' or '<HH:MM' <<< e.g. "<20h" search only for shows STARTING BEFORE (or ON; so including) the provided time
-                           '@Mon' .. '@sun'  <<< search only for shows GIVEN AT CERTAIN WEEKDAY
-                           '@DD' <<< search only for shows with a DURATION EQUAL the provided length in minutes
-                           '<DD' <<< search only for shows with a DURATION LESS (or EQUAL; so including) the provided length in minutes
-                           '>DD' <<< search only for shows with a DURATION MORE (or EQUAL; so including) the provided length in minutes
-    
-      [--]dl|download  <<< reads URL to download from stdin
-                       <<< will NOT re-download if decoded file already exists; except if FORCE is used
-    
-      [--]get          <<< LIKE --dl, but will after successful download automatically DECODE (like calling my-otr --decode)!
-    
-    
-    Uses CONFIG FILE '~/.my-otr.conf'. You can change location with --conf parameter!
-    
-    SOME DEFAULT VALUES FROM CONFIG FILE:
-      QUIET   = '' <<< if QUIET is set (so != ''), then by default this script will supress any regular status output (search results will still be printed) 
-      LOG     = '1' <<< if LOG is set (so != ''), then by default this script will redirect all output to this LOGFILE '~/.my-otr.log'! (see --no-log above)
-      VRB     = '' <<< if VRB is set (so != ''), then by default this script will print VERBOSE output (see --verbose above)
-      DBG     = '' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --debug above)
-      DEEPDBG = '' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --deep-debug above)
-      FORCE   = '' <<< if FORCE is set (so != ''), then by default this script will FORCE some things (see --force above)
-    
-    EXAMPLES:
-      # Search all Bares fuer Rares given on channel 'zdf', aired on or after 2020-02-28 and only shows given at exactly 15h05:
-      my-otr search "bares fuer rares" @zdf ">2020-02-28" @15:05
-    
-      # Simply download ALL available Bares fuer Rares and decode them (but starting with the OLDEST -- hence the 'tac'):
-      my-otr search bares fuer rares|tac|my-otr get
-    
-    REMARKS:
-    ### ALL OUTPUT (regular status ouput (notice), VERBOSE, DEBUG output) all goes to STDERR /or/ to LOGFILE.
-    ### ANY OUTPUT useful to be piped to next tool will go to STDOUT !
-    
+    usage: my-otr [OPTIONS] <COMMAND> [<ARGS>]
+
+    Search otr.datenkeller.net, download with aria2c, and decode OTR's .otr2 and
+    .otrkey files. Results go to stdout; everything else to stderr and the LOGFILE.
+
+    COMMANDS
+      search <TITLE..> [<FILTER>..]   the best file of each recording, oldest
+                                      first, one name per line. FILTERs ('@' ones
+                                      may repeat; quote those with < and >):
+          @<channel>                    on this channel (as otr.datenkeller.net names it)
+          '>2026-01-31' '<2026-03-01'   on or after / on or before the day
+          @2026-02-14                   on the day
+          @20h @20:15                   starting at
+          '>20h' '<22:30'               starting from / until -- '>22h' '<02h'
+                                        spans midnight
+          @Mon .. @Sun                  on the weekday
+          @45 '>90' '<30'               lasting exactly / at least / at most N minutes
+      get [--no-decode]               download the names (or URLs) on stdin into
+                                      the current folder -- not one whose copy
+                                      here is as good -- then decode every complete
+                                      .otr2 / .otrkey in it; --no-decode: download only
+      dl                              the same as get --no-decode
+      decode <FILE>.. [<DIR>]         decode into DIR (else DEFAULT_DECODE_OUTP_DIR);
+                                      FILE '-': the names on stdin
+      login                           log in to otr.datenkeller.net (get does)
+      update-check <ZIP>              what a new release of OTR's decoder changed in
+                                      the protocol my-otr speaks
+
+      Decoding removes the source once the result is complete and -- where OTR
+      sends one -- matches its checksum. The quality taken: HQ, then the small
+      ones, then HD (HD first with OTR_QUALITY_CAP="HD").
+
+    OPTIONS
+      -Q, --quiet              nothing on the terminal but results and errors
+      -V, --verbose            also each request, and each skip with its reason
+      -D, --debug              also the diagnostics (~~~); implies -V
+      -F, --force              log in, download and decode again what is here
+      -l, --log / -L, --no-log   keep the LOGFILE record / keep none
+      --log-file <FILE>        record into FILE (implies -l)
+      --config <FILE>          read FILE instead of searching for one
+      --create-config [<FILE>] the default config, to stdout or into a new FILE
+      --run-tests [<FILTER>]   the built-in tests (TAP); FILTER: part of a name
+      --version                the exact build
+      -h, --help               this
+
+      The old spellings --search --get --dl --download --decode --login still work.
+
+    CONFIG  KEY="value" lines, read and never run -- the first found of
+      $MY_OTR_CONFIG, --config <FILE>,
+      /LINKS/default/my-otr.conf, /LINKS/default/my-otr, ~/.my-otr.conf, /etc/my-otr.conf, /usr/local/etc/my-otr.conf
+      A <FILE>.GLOBAL beside it is read first, the file itself on top.
+
+    EXAMPLES
+      my-otr search "bares fuer rares" @zdf '>2026-02-28' @15:05
+      my-otr search "bares fuer rares" | my-otr get

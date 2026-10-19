@@ -1,1111 +1,1971 @@
-#!/bin/sh
+#!/usr/bin/env python3
+"""my-otr -- search, download and decode OTR recordings.
 
-# 088 == highest used errCode
+Searches otr.datenkeller.net, downloads with aria2c, and decodes both of
+onlinetvrecorder.com's formats itself: `.otr2` (since 2026) and `.otrkey`
+(before). `my-otr --help` says how to drive it.
 
-US=${0##*/};   # get filename without path
-US_CALL="\"$0\""; for a in "$@"; do US_CALL="$US_CALL \"$a\""; done
+One file, in this order:
+  1. bootstrap   -- the venv ~/.python.venv/my-otr (stdlib only up to here)
+  2. output, errors, config
+  3. recordings: names, qualities, the search filter, the copies already here
+  4. HTTP, otr.datenkeller.net, aria2c
+  5. the OTR protocol -- our own code; OTR's decoder is only the reference it
+     was written from (`my-otr update-check <ZIP>` lists what a release changed)
+  6. commands, main, --run-tests
+"""
 
-NOW="$( date +"%Y-%m-%d_%H%M.%S")"
+from __future__ import annotations
 
-. "/LINKS/default/my-cmdstrs" || { /LINKS/bin/my-notify -- "[$US] ERROR:" "FAILED [$?] TO ACCESS CMDSTRFILE. EXITING."; exit 1; }
+import array
+import base64
+import contextlib
+import datetime
+import getpass
+import hashlib
+import http.cookiejar
+import io
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO, Callable, Dict, Final, List, Literal, NoReturn, Optional, Sequence, Tuple, cast
 
-#########################################################
+SCRIPT_NAME: Final = "my-otr"
+SCRIPT_VERSION: Final = "3.0"
+SCRIPT_COMMIT: Final = "unstamped"
+REPOSITORY: Final = "Tormen/my-otr"      # whose tags --version may read as releases
 
-DEFAULT_CONF_FILE=~/".$US.conf"
-TEMPFILE="/tmp/$US.$$.tmp";    # space separated list of tempfiles
-CLEANUP_DONE=; # avoid multiple cleanups; is set in _cleanup_()
 
-CURL_OPTS="--silent --show-error";
+# --- 1. bootstrap ----------------------------------------------------------
 
-##########################################################
-#### CONF DEFAULT VALUES:
+VENV_DIR: Final = Path.home() / ".python.venv" / SCRIPT_NAME
+# why: AES-256-CTR/-GCM, ECDH P-256, HKDF and Blowfish -- OTR's two file
+# formats; the standard library has none of them. >= 43: Blowfish lives in
+# cryptography.hazmat.decrepit from that version on.
+VENV_DEPS: Final = ("cryptography>=43",)
 
-DEFAULT_SECRET="..."
 
-### ALL OUTPUT (regular status ouput (notice), VERBOSE, DEBUG output) all goes to STDERR /or/ to LOGFILE.
-### ANY OUTPUT useful to be piped to next tool will go to STDOUT !
+def bootstrap() -> None:
+    """Run inside ~/.python.venv/my-otr: create it on first use, then re-exec there."""
+    if Path(sys.prefix).resolve() == VENV_DIR.resolve():
+        return
+    py = VENV_DIR / "bin" / "python3"
+    if not py.is_file():
+        print(f" >>> {SCRIPT_NAME}: setting up its Python environment {VENV_DIR} (once): {', '.join(VENV_DEPS)}",
+              file=sys.stderr)
+        # Built beside it and renamed into place: an interrupted setup leaves
+        # no half venv for the next run to trust.
+        new = VENV_DIR.with_name(f".{SCRIPT_NAME}.new.{os.getpid()}")
+        try:
+            subprocess.run([sys.executable, "-m", "venv", str(new)], check=True)
+            subprocess.run([str(new / "bin" / "python3"), "-m", "pip", "install", "--quiet",
+                            "--disable-pip-version-check", *VENV_DEPS], check=True)
+            new.rename(VENV_DIR)
+        except (OSError, subprocess.CalledProcessError) as e:
+            shutil.rmtree(new, ignore_errors=True)
+            print(f"ERROR 00001 [1]: cannot set up {VENV_DIR}: {e}", file=sys.stderr)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            shutil.rmtree(new, ignore_errors=True)
+            print(f"{SCRIPT_NAME}: interrupted (Ctrl-C) while setting up {VENV_DIR} -- nothing is left of it",
+                  file=sys.stderr)
+            sys.exit(130)
+    os.execv(str(py), [str(py), os.path.realpath(__file__), *sys.argv[1:]])
 
-QUIET=;    # regular status output (independent of VRB output and DBG output and DEPDBG)
-VRB=;      # VERBOSE output (independent of 'regular status output' and DBG output and DEPDBG)
-DBG=;      # DEBUG   output (independent of 'regular status output' and VRB output and DEEPDBG)
-DEEPDBG="" # DEBUG OUTPUT of subcommands (independent of 'regular status output' and VRB output and DBG)
-FORCE=""
-DATENKELLER_LOGIN="$DEFAULT_SECRET"
-DATENKELLER_PASSW="$DEFAULT_SECRET"
-DATENKELLER_APIKEY="$DEFAULT_SECRET"
-OTR_LOGIN="$DEFAULT_SECRET"
-OTR_PASSW="$DEFAULT_SECRET"
-COOKIE_FILE="/tmp/my-otr___cookies.txt"
-LOGFILE=~/".my-otr.log";
+
+# --- 2. output, errors -----------------------------------------------------
+
+class OtrError(Exception):
+    """The tool's one failure: a code naming the source line, and what to know."""
+
+    def __init__(self, code: str, text: str) -> None:
+        super().__init__(f"{code}: {text}")
+        self.code = code
+        self.text = text
+
+
+def err(code: str, text: str) -> NoReturn:
+    raise OtrError(code, text)
+
+
+class Out:
+    """Where every line goes. stdout carries results only; the narration goes
+    to stderr (silenced by -Q) and, whatever -Q says, to the LOGFILE."""
+
+    def __init__(self) -> None:
+        self.quiet = False
+        self.vrb = False
+        self.dbg_on = False
+        self.log: Optional[IO[str]] = None
+
+    def record(self, text: str) -> None:
+        if self.log is None:
+            return
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for line in text.splitlines() or [""]:
+            self.log.write(f"{stamp} [{os.getpid()}] {line}\n")
+        self.log.flush()
+
+    def _say(self, text: str, shown: bool) -> None:
+        self.record(text)
+        if shown:
+            print(text, file=sys.stderr, flush=True)
+
+    def msg(self, text: str) -> None:
+        self._say(text, not self.quiet)
+
+    def det(self, text: str) -> None:
+        if self.vrb:
+            self._say(text, not self.quiet)
+
+    def dbg(self, text: str) -> None:
+        if self.dbg_on:
+            self._say(" ~~~ " + text, True)
+
+    def warn(self, text: str) -> None:
+        self._say("WARNING: " + text, True)
+
+    def error(self, text: str) -> None:
+        self._say(text, True)
+
+    def result(self, line: str) -> None:
+        print(line, flush=True)
+
+
+OUT = Out()
+_phase = "starting"
+
+
+def phase(text: str) -> None:
+    """What the run is doing now -- the Ctrl-C line names it."""
+    global _phase
+    _phase = text
+    OUT.dbg(f"phase: {text}")
+
+
+# --- 2. config -------------------------------------------------------------
+
+Quality = Literal["DivX", "LQ", "MP4", "HQ", "HD"]
+QUALITY_RANK: Final[Dict[Quality, int]] = {"DivX": 1, "LQ": 2, "MP4": 2, "HQ": 3, "HD": 4}
+QualityCap = Literal["HQ", "HD"]
+
+DEFAULT_CONFIG: Final = '''\
+## my-otr.conf -- KEY="value" lines. my-otr READS this file, it never runs it:
+## no commands, no functions; $NAME and ${NAME} expand a key set above, or
+## the environment. Searched, first found wins (my-otr --help); a <FILE>.GLOBAL
+## beside the one found is read first, the file itself on top.
+
+## otr.datenkeller.net -- search and download
+## (the API key: Login -> Settings -> "API Key anzeigen")
+DATENKELLER_LOGIN=""
+DATENKELLER_PASSW=""
+DATENKELLER_APIKEY=""
+
+## www.onlinetvrecorder.com -- the account that decodes
+OTR_LOGIN=""
+OTR_PASSW=""
+
+## the record of every run -- it gets every line, also under -Q.
+## LOG="" keeps none (-l / -L / --log-file override it per run)
+LOGFILE="$HOME/.my-otr.log"
 LOG="1"
-LOG_ERR_TO_SYSLOG="1";
-OTR_SEARCH_LIMIT="9999";
-OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
-GAWK_CMD="$c_gawk" # We need GNU awk !
-SEARCH_CMD="$c_wget"
-SEARCH_CMD_PARAMS="--quiet --output-document=-"
-GET_DLURL_CMD="$c_wget"
-GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
-OTR_DL_CMD="$c_aria2c"
-OTR_DL_CMD_PARAMS="--log=/tmp/my-otr___aria2c.log --log-level=notice -j1 -c" # -j3 --quiet 
+
+## the defaults of -Q / -V / -D / -F ("1" = on)
+QUIET=""
+VRB=""
+DBG=""
+FORCE=""
+
+## the best quality worth having: HQ (an HD is then never fetched over an
+## HQ -- HQ is enough), or HD
+OTR_QUALITY_CAP="HQ"
+
+## the downloader, and its options; my-otr feeds it the URL and the file
+## name on stdin (--input-file=-), never on its command line
+OTR_DL_CMD="aria2c"
+OTR_DL_CMD_PARAMS="--log-level=notice -j1 -c"
+
+## where 'decode' writes when no DIR is given ("": a DIR is required)
+DEFAULT_DECODE_OUTP_DIR=""
+
+## the otr.datenkeller.net session of 'login' (written 0600)
+COOKIE_FILE="$HOME/.my-otr.cookies"
+'''
 
 
-##########################################################
+@dataclass(frozen=True)
+class Settings:
+    """The config, parsed: every key typed, every default from DEFAULT_CONFIG."""
 
-NL="
-"
-### PRIVATE BROWSER SESSION
-### Login to https://otr.datenkeller.at/
-### https://help.mypurecloud.com/articles/gathering-console-network-logs/
-### --> .har file !
-### har-to-curl /dl/otr.datenkeller.net.har|less
+    files: Tuple[Path, ...]
+    datenkeller_login: str
+    datenkeller_passw: str
+    datenkeller_apikey: str
+    otr_login: str
+    otr_passw: str
+    logfile: str
+    log: bool
+    quiet: bool
+    vrb: bool
+    dbg: bool
+    force: bool
+    quality_cap: QualityCap
+    dl_cmd: str
+    dl_params: Tuple[str, ...]
+    decode_dir: str
+    cookie_file: str
 
-EXAMPLE_CONF='
-# Commented lines of VARIABLES below show the DEFAULT VALUES; feel free to adapt.
+    def secret(self, key: str) -> str:
+        """A credential the command needs: refused when the config left it empty."""
+        value: str = getattr(self, key.lower())
+        if not value:
+            where = " + ".join(str(p) for p in self.files) or "the config"
+            err("00002", f"{key} is not set -- {where} must set it for this command")
+        return value
 
-# Define GNU awk path to be used when calling awk to execute OUR_AWK_SCRIPT:
-GAWK_CMD="gawk"
 
-# Only set this if you want to store my-otr.awk NOT in the same directory as my-otr and NOT in ~/.my-otr.awk:
-OUR_AWK_SCRIPT=""
+def config_search_paths() -> List[Path]:
+    """Where the config is looked for, in order (after $MY_OTR_CONFIG and --config)."""
+    site = Path(os.environ.get("LINKS", "/LINKS")) / "default"
+    return [site / f"{SCRIPT_NAME}.conf", site / SCRIPT_NAME, Path.home() / f".{SCRIPT_NAME}.conf",
+            Path("/etc") / f"{SCRIPT_NAME}.conf", Path("/usr/local/etc") / f"{SCRIPT_NAME}.conf"]
 
-DATENKELLER_LOGIN="'$DEFAULT_SECRED'" # <YOUR https://otr.datenkeller.net LOGIN>
-DATENKELLER_PASSW="'$DEFAULT_SECRED'" # <YOUR https://otr.datenkeller.net PASSWORD>
-DATENKELLER_APIKEY="'$DEFAULT_SECRED'" # <YOUR https://otr.datenkeller.net APIKEY>     ( Login -> Settings -> API Key anzeigen )
 
-OTR_LOGIN='\''<YOUR https://www.onlinetvrecorder.com LOGIN>'\''
-OTR_PASSW='\''<YOUR https://www.onlinetvrecorder.com PASSWORD>'\''
+def config_offer() -> List[str]:
+    """Where to write a config, most common place first -- a FILTER of the
+    search list, so it never names a place that is not read."""
+    searched = config_search_paths()
+    return [str(p) for p in (Path("/etc") / f"{SCRIPT_NAME}.conf", Path.home() / f".{SCRIPT_NAME}.conf")
+            if p in searched]
 
-###################################################################
-### ALL OUTPUT (regular status ouput (notice), VERBOSE, DEBUG output) all goes to STDERR /or/ to LOGFILE.
-### ANY OUTPUT useful to be piped to next tool will go to STDOUT !
 
-# Regular status output (independent of VRB output and DBG output and DEPDBG)
-# Do NOT suppress "regular status output" (to do suppress, set QUIET=1)
-#QUIET="";
+_KEY_LINE: Final = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_NAME_REF: Final = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
-# VERBOSE output (independent of "regular status output" and DBG output and DEPDBG)
-# Turn off VERBOSE output by default (to turn on set VRB="1")
-#VRB=;
 
-# DEBUG   output (independent of "regular status output" and VRB output and DEEPDBG)
-# Turn off DEBUG output by default (to turn on set DBG=1)
-#DBG=;
+def _expand(text: str, names: Dict[str, str], where: str) -> str:
+    if "$(" in text or "`" in text:
+        err("00003", f"{where}: a command substitution -- my-otr reads its config, it never runs it")
 
-# DEBUG OUTPUT of subcommands (independent of "regular status output" and VRB output and DBG)
-# Turn off DEEP-DEBUG output by default (to turn on set DEEPDBG=1)
-# This will then include printing DEBUG output for subcommands called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()!
-#DEEPDBG=""
+    def one(m: re.Match[str]) -> str:
+        name = m.group(1) or m.group(2)
+        if name in names:
+            return names[name]
+        if name in os.environ:
+            return os.environ[name]
+        if name == "USER":
+            return getpass.getuser()
+        if name == "HOME":
+            return str(Path.home())
+        err("00004", f"{where}: ${name} is not set (a key above, or the environment)")
 
-# By default do NOT force things (to force everything by default set FORCE=1;)
-# The decisions influenced by this are:
-#   * relogin even though cookie found
-#   * redownload even though target file already found 
-#FORCE=""
+    return _NAME_REF.sub(one, text)
 
-#DEFAULT_DECODE_OUTP_DIR=~"/Movies";
 
-get_decode_cmd() { # can use global variables: OTR_LOGIN, OTR_PASSW, OUTP_DIR, INP_FILE
-  # https://github.com/otrtool/otrtool: Runs under Linux + MacOS
-  echo "otrtool -x -u -e \"$OTR_LOGIN\" -p \"$OTR_PASSW\" -D \"$OUTP_DIR\" \"$INP_FILE\""
-  # https://www.onlinetvrecorder.com/v2/software/Linux: "Decoder"/"Dekoder": Runs under Linux + MacOS
-  #echo "otrdecoder -q -e \"$OTR_LOGIN\" -p \"$OTR_PASSW\" -o \"$OUTP_DIR\" -i \"$1\" && rm \"$INP_FILE\""
+def parse_value(raw: str, names: Dict[str, str], where: str) -> str:
+    """One shell word: unquoted, "double" ($ expanded) and 'single' parts, a
+    leading ~ as $HOME, then nothing but a # comment."""
+    out: List[str] = []
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if c == "'":
+            j = raw.find("'", i + 1)
+            if j < 0:
+                err("00005", f"{where}: a ' is not closed")
+            out.append(raw[i + 1:j])
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            part: List[str] = []
+            while j < len(raw) and raw[j] != '"':
+                if raw[j] == "\\" and j + 1 < len(raw) and raw[j + 1] in '"\\$`':
+                    j += 1
+                part.append(raw[j])
+                j += 1
+            if j >= len(raw):
+                err("00006", f"{where}: a \" is not closed")
+            out.append(_expand("".join(part), names, where))
+            i = j + 1
+        elif c in " \t":
+            rest = raw[i:].strip()
+            if rest and not rest.startswith("#"):
+                err("00007", f"{where}: more than one word -- quote the value")
+            break
+        else:
+            m = re.match(r"[^'\" \t]+", raw[i:])
+            assert m is not None, "c is none of the characters the word stops at"
+            word = m.group(0)
+            i += len(word)
+            if not out and (word == "~" or word.startswith("~/")):
+                word = str(Path.home()) + word[1:]
+            out.append(_expand(word, names, where))
+    return "".join(out)
+
+
+def read_config_text(text: str, where: str, names: Dict[str, str]) -> List[str]:
+    """Add the KEY=value lines of `text` to `names`; return the keys it set."""
+    keys: List[str] = []
+    for n, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        m = _KEY_LINE.match(s)
+        if m is None:
+            err("00008", f"{where}:{n}: not a KEY=\"value\" line -- my-otr reads its config, it never runs it: {s[:60]}")
+        names[m.group(1)] = parse_value(m.group(2), names, f"{where}:{n}")
+        keys.append(m.group(1))
+    return keys
+
+
+def _flag(value: str, key: str, where: str) -> bool:
+    if value in ("", "0"):
+        return False
+    if value == "1":
+        return True
+    err("00009", f"{where}: {key}=\"{value}\" -- \"1\" (on) or \"\" (off)")
+
+
+def load_settings(override: Optional[str]) -> Settings:
+    """The config: the defaults, then <FILE>.GLOBAL, then <FILE> on top."""
+    phase("reading the config")
+    names: Dict[str, str] = {}
+    defaults = read_config_text(DEFAULT_CONFIG, "the built-in defaults", names)
+    chosen = override or os.environ.get("MY_OTR_CONFIG")
+    if chosen:
+        if not Path(chosen).is_file():
+            err("00010", f"config '{chosen}' not found (--config / $MY_OTR_CONFIG)")
+        found = Path(chosen)
+    else:
+        hits = [p for p in config_search_paths() if p.is_file()]
+        if not hits:
+            lines = "\n".join(f"        > {SCRIPT_NAME} --create-config > {p}" for p in config_offer())
+            err("00011", f"no config found -- write one, most common place first:\n{lines}\n"
+                         f"    ({SCRIPT_NAME} --help lists every place it is looked for)")
+        found = hits[0]
+    files = [p for p in (found.with_name(found.name + ".GLOBAL"), found) if p.is_file()]
+    for p in files:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as e:
+            err("00012", f"cannot read the config {p}: {e.strerror}")
+        for key in read_config_text(text, str(p), names):
+            if key not in defaults:
+                OUT.warn(f"{p}: {key} is not a my-otr setting -- ignored ('{SCRIPT_NAME} --create-config' lists them)")
+    where = " + ".join(str(p) for p in files)
+    cap = names["OTR_QUALITY_CAP"]
+    if cap not in ("HQ", "HD"):
+        err("00013", f"{where}: OTR_QUALITY_CAP=\"{cap}\" -- HQ or HD")
+    try:
+        dl_params = tuple(shlex.split(names["OTR_DL_CMD_PARAMS"]))
+    except ValueError as e:
+        err("00014", f"{where}: OTR_DL_CMD_PARAMS: {e}")
+    return Settings(
+        files=tuple(files),
+        datenkeller_login=names["DATENKELLER_LOGIN"], datenkeller_passw=names["DATENKELLER_PASSW"],
+        datenkeller_apikey=names["DATENKELLER_APIKEY"],
+        otr_login=names["OTR_LOGIN"], otr_passw=names["OTR_PASSW"],
+        logfile=names["LOGFILE"], log=_flag(names["LOG"], "LOG", where),
+        quiet=_flag(names["QUIET"], "QUIET", where), vrb=_flag(names["VRB"], "VRB", where),
+        dbg=_flag(names["DBG"], "DBG", where), force=_flag(names["FORCE"], "FORCE", where),
+        quality_cap="HD" if cap == "HD" else "HQ",
+        dl_cmd=names["OTR_DL_CMD"], dl_params=dl_params,
+        decode_dir=names["DEFAULT_DECODE_OUTP_DIR"], cookie_file=names["COOKIE_FILE"])
+
+
+# --- 3. recordings: names, qualities, the search filter --------------------
+
+# <Title>_<YY.MM.DD>_<HH-MM>_<channel>_<minutes>_TVOON_DE.<q>.<otrkey|otr2>
+_OTR_NAME: Final = re.compile(
+    r"^(?P<title>.+)_(?P<date>\d\d\.\d\d\.\d\d)_(?P<time>\d\d-\d\d)_(?P<channel>[^_]+)_(?P<minutes>\d+)"
+    r"_TVOON_DE\.(?P<q>.+)\.(?P<fmt>otrkey|otr2)$")
+# what follows "TVOON_DE." -- None: an add-on (a ZIP, an AC3 track), never a recording
+_OTR_QUALITY: Final[Dict[str, Optional[Quality]]] = {
+    "mpg.hq.avi": "HQ", "mpg.hd.avi": "HD", "mpg.avi": "DivX", "mpg.mp4": "MP4",  # .otrkey
+    "hq": "HQ", "hd": "HD", "lq": "LQ",                                         # .otr2
+    "mpg.addon": None, "mpg.hd.ac3": None,
 }
-
-#COOKIE_FILE="/tmp/my-otr___cookies.txt"
-
-#LOGFILE=~/.my-otr.log;
-# Turn on logging by default (to turn off set LOG=""):
-#LOG=1;
-# All ERRORs will be logged to syslog/journal (using tag "'$US'"):
-#LOG_ERR_TO_SYSLOG="1";
-
-# Usually do NOT touch this! - Set search limit. If you decrease this and get more results then the script will only treat the FIRST results page !
-#OTR_SEARCH_LIMIT="9999";
-# If you think HD is twice the size of HQ but not twice the quality of HQ recordings and are fine with HQ quality as BEST quality, then please leave this:
-# If there is no HQ but ONLY HD available the script will still download the HD version (!):
-#OTR_QUALITY_CAP="HQ" # ignore HD (over HQ; HQ is enough)
-
-# Define the tool + parameters that query the otr.datenkeller.net API (SEARCH_CMD for search, GET_DLURL_CMD for the download URL).
-# The API URL carries your APIKEY, so it is NOT a parameter: it is fed on STDIN with wget'\''s --input-file=- (added by my-otr),
-# which keeps the key off the process list (ps). Both must therefore be wget-compatible.
-#SEARCH_CMD="wget"
-#SEARCH_CMD_PARAMS="--quiet --output-document=-"
-#GET_DLURL_CMD="wget"
-#GET_DLURL_CMD_PARAMS="--quiet --output-document=-"
-
-# Define download tool and the tool parameters (LAST parameter will be the URL to be downloaded from):
-#OTR_DL_CMD="aria2c"
-#OTR_DL_CMD_PARAMS="--log=/tmp/my-otr___aria2c.log --log-level=notice --quiet -j9 -c"
-'
+_TAG_QUALITY: Final[Dict[str, Quality]] = {"hq": "HQ", "hd": "HD", "mp4": "MP4", "divx": "DivX", "lq": "LQ"}
+WEEKDAYS: Final = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+Slot = Tuple[datetime.date, Tuple[int, int], str, int]
 
 
-usage() {
-  echo "usage: $0 [OPTIONS] <COMMAND> [[PARAM] [..]]
+@dataclass(frozen=True)
+class Recording:
+    """One OTR file name, parsed."""
 
-OPTIONS:
-  -C  | --conf [FILE]  If FILE is provided: Use FILE as config file (instead of '$DEFAULT_CONF_FILE').
-                       If called WITHOUT FILE this will print the DEFAULT CONFIG.
-                       You can use this to create your default config file:
-                         $US --conf > \"$DEFAULT_CONF_FILE\"
-  -Q  | --quiet        Supress any regular status output of the script (search results will still be printed). Independent of VERBOSE and DEBUG !
-  -V  | --verbose      Turn VERBOSE output ON.
-  -D  | --debug        Turn DEBUG output ON.
-  -DD | --deep-debug   Turn DEBUG for subcommands ON called by this script: my-otr.awk, decode_cmd as returned by get_decode_cmd()
-                       Independent of regular debug output (--debug).
-  -l  | --log          Turn LOGGING of any output (verbose, debug, deep-debug) ON. Logs to LOGFILE '$LOGFILE' by default.
-  -L  | --no-log       Prevent logging to LOGFILE '$LOGFILE'.
-  --log-file FILE      Set LOGFILE to FILE.
-  -F  | --force        Do FORCE things - you'll be informed (in VERBOSE mode) where this can help.
-  --run-tests [FILTER] Run the built-in tests (those whose name contains FILTER); stubs only, no config needed.
+    name: str
+    title: str
+    day: datetime.date
+    hhmm: Tuple[int, int]
+    channel: str
+    minutes: int
+    quality: Optional[Quality]
 
-COMMAND can be:
-  [--]help     shows this usage information
+    @property
+    def slot(self) -> Slot:
+        """What makes two names one recording: when, where, how long."""
+        return (self.day, self.hhmm, self.channel.lower(), self.minutes)
 
-  [--]decode   <OTRFILE> [<OTRFILE> [..]] [<OUTPUT-DIR> defaults to $DEFAULT_DECODE_OUTP_DIR]
-               <OTRFILE> can be '-', then the OTRFILE(s) are read from stdin !
-               The script will stop decoding and quit on errors.
-               <OUTPUT-DIR> needs to be a directory that exists.
-               This command is by default SILENT. Use --verbose to see decoded filenames.
-
-  [--]login    <<< will NOT re-loging if cookie file found; except if FORCE is used <<< #TODO# automatically re-login in case cookie is not valid anymore
-
-  [--]search   <<< allow filtering via additional parameters:
-                   MANDATORY parameter:
-                       TITLE SEARCH TEXT <<< text to search for in titles (this is what you would type into searchbox on otr.datenkeller.net!)
-                                         <<< will STOP to take parameters as TITLE-SEARCH-TEXT when a ',' is found!
-                   OPTIONAL parameters: All parameters starting with '@' can be provided multiple times!
-                       DESCRIPTION SEARCH TEXT <<< OPTIONAL 2nd text parameter; this will be used to search in the description <<< NOT YET IMPLEMENTED !!! #TODO#
-                       @channel <<< search only in provided channel name (channel name must match otr.datenkeller.net)
-                       '>date' <<< search only for shows AFTER (or ON; so including) a given date; in format: 2021-11-24
-                       '<date' <<< search only for shows UP TO (or ON; so including) a given date; in format: 2021-11-24
-                       '@date' <<< search only for shows AT a given date; in format: 2021-11-24
-                       '@HH:' or '@HHh' or '@HH:MM' <<< e.g. \"@20h\" search only for shows STARTING AT the provided time
-                       '>HH:' or '>HHh' or '>HH:MM' <<< e.g. \">20h\" search only for shows STARTING AFTER (or ON; so including) the provided time
-                       '<HH:' or '<HHh' or '<HH:MM' <<< e.g. \"<20h\" search only for shows STARTING BEFORE (or ON; so including) the provided time
-                       '@Mon' .. '@sun'  <<< search only for shows GIVEN AT CERTAIN WEEKDAY
-                       '@DD' <<< search only for shows with a DURATION EQUAL the provided length in minutes
-                       '<DD' <<< search only for shows with a DURATION LESS (or EQUAL; so including) the provided length in minutes
-                       '>DD' <<< search only for shows with a DURATION MORE (or EQUAL; so including) the provided length in minutes
-
-  [--]dl|download  <<< reads URL to download from stdin
-                   <<< will NOT re-download if decoded file already exists; except if FORCE is used
-
-  [--]get          <<< LIKE --dl, but will after successful download automatically DECODE (like calling $US --decode)!
+    def slot_marks(self) -> Tuple[str, str]:
+        """The slot as it appears in a local file name, lowercased: OTR's form, and
+        the one of renamed files ("... [2026-10-04] [10h15] [zdf] [dur=100] [TVOON] [HQ].avi")."""
+        d, (h, m) = self.day, self.hhmm
+        return (f"_{d:%y.%m.%d}_{h:02d}-{m:02d}_{self.channel}_{self.minutes}_tvoon_de".lower(),
+                f"[{d:%Y-%m-%d}] [{h:02d}h{m:02d}] [{self.channel}] [dur={self.minutes}] [tvoon]".lower())
 
 
-Uses CONFIG FILE '$CONF_FILE'. You can change location with --conf parameter!
+def parse_otr_name(name: str) -> Optional[Recording]:
+    """An OTR file name as a Recording; None when it is not one. A quality OTR
+    has not used before stops the run: it must be learned, not guessed."""
+    m = _OTR_NAME.match(name)
+    if m is None:
+        return None
+    q = m.group("q").lower()
+    if q not in _OTR_QUALITY:
+        err("00015", f"'{name}': the quality '{m.group('q')}' is new -- my-otr does not know it yet")
+    try:
+        day = datetime.datetime.strptime(m.group("date"), "%y.%m.%d").date()
+        hh, mm = (int(x) for x in m.group("time").split("-"))
+        if hh > 23 or mm > 59:
+            raise ValueError(m.group("time"))
+    except ValueError:
+        err("00016", f"'{name}': no valid date and time in it")
+    return Recording(name, m.group("title"), day, (hh, mm), m.group("channel"),
+                     int(m.group("minutes")), _OTR_QUALITY[q])
 
-SOME DEFAULT VALUES FROM CONFIG FILE:
-  QUIET   = '$QUIET' <<< if QUIET is set (so != ''), then by default this script will supress any regular status output (search results will still be printed) 
-  LOG     = '$LOG' <<< if LOG is set (so != ''), then by default this script will redirect all output to this LOGFILE '$LOGFILE'! (see --no-log above)
-  VRB     = '$VRB' <<< if VRB is set (so != ''), then by default this script will print VERBOSE output (see --verbose above)
-  DBG     = '$DBG' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --debug above)
-  DEEPDBG = '$DEEPDBG' <<< if DBG is set (so != ''), then by default this script will print DEBUG output (see --deep-debug above)
-  FORCE   = '$FORCE' <<< if FORCE is set (so != ''), then by default this script will FORCE some things (see --force above)
 
-EXAMPLES:
-  # Search all Bares fuer Rares given on channel 'zdf', aired on or after 2020-02-28 and only shows given at exactly 15h05:
-  my-otr search \"bares fuer rares\" @zdf \">2020-02-28\" @15:05
+def capped_rank(q: Quality, cap: QualityCap) -> int:
+    return min(QUALITY_RANK[q], QUALITY_RANK[cap])
 
-  # Simply download ALL available Bares fuer Rares and decode them (but starting with the OLDEST -- hence the 'tac'):
-  my-otr search "bares fuer rares"|tac|my-otr get
 
-REMARKS:
-### ALL OUTPUT (regular status ouput (notice), VERBOSE, DEBUG output) all goes to STDERR /or/ to LOGFILE.
-### ANY OUTPUT useful to be piped to next tool will go to STDOUT !
-"
-  exit 0
+def local_quality(name: str) -> Optional[Quality]:
+    """The quality of a file already here: a [HQ]/[HD]/[mp4]/[divx]/[LQ] tag
+    (renamed files), else what follows OTR's "_TVOON_DE.". None: not a recording."""
+    tag = re.search(r"\[(hq|hd|mp4|divx|lq)\]", name, re.IGNORECASE)
+    if tag:
+        return _TAG_QUALITY[tag.group(1).lower()]
+    rest = name.lower().partition("_tvoon_de.")[2]
+    for suffix in (".otrkey", ".otr2"):
+        if rest.endswith(suffix):
+            return _OTR_QUALITY.get(rest[:-len(suffix)])
+    if rest in _OTR_QUALITY:                       # a decoded .otrkey: "mpg.hq.avi"
+        return _OTR_QUALITY[rest]
+    return _OTR_QUALITY.get(rest.split(".")[0])    # a decoded .otr2: "hq.mp4"
+
+
+def unfinished(p: Path) -> bool:
+    """aria2c's control file beside it: that download is not done."""
+    return p.with_name(p.name + ".aria2").exists()
+
+
+def copies_here(rec: Recording, folder: Path) -> List[Tuple[Path, Quality]]:
+    """The finished files in `folder` that are this recording, with their quality."""
+    marks = rec.slot_marks()
+    found: List[Tuple[Path, Quality]] = []
+    for p in sorted(folder.iterdir()):
+        low = p.name.lower()
+        if not any(mark in low for mark in marks) or low.endswith((".aria2", ".my-otr.part")):
+            continue
+        q = local_quality(p.name)
+        if q is not None and p.is_file() and not unfinished(p):
+            found.append((p, q))
+    return found
+
+
+def as_good_here(rec: Recording, q: Quality, folder: Path, cap: QualityCap) -> Optional[Tuple[Path, Quality]]:
+    """A copy here as good as quality `q` of `rec`, or better -- above the cap,
+    every quality counts as the cap."""
+    for p, have in copies_here(rec, folder):
+        if capped_rank(have, cap) >= capped_rank(q, cap):
+            return p, have
+    return None
+
+
+@dataclass
+class Filters:
+    """What `search` keeps: every kind given must match (any of its values)."""
+
+    title: List[str] = field(default_factory=lambda: [])
+    channels: List[str] = field(default_factory=lambda: [])
+    day_from: Optional[datetime.date] = None
+    day_till: Optional[datetime.date] = None
+    times: List[Tuple[int, int]] = field(default_factory=lambda: [])
+    time_from: Optional[Tuple[int, int]] = None
+    time_till: Optional[Tuple[int, int]] = None
+    weekdays: List[int] = field(default_factory=lambda: [])
+    durations: List[int] = field(default_factory=lambda: [])
+    dur_from: Optional[int] = None
+    dur_till: Optional[int] = None
+
+    def keeps(self, rec: Recording) -> bool:
+        if self.channels and rec.channel.lower() not in self.channels:
+            return False
+        if (self.day_from and rec.day < self.day_from) or (self.day_till and rec.day > self.day_till):
+            return False
+        if self.weekdays and rec.day.weekday() not in self.weekdays:
+            return False
+        if (self.times or self.time_from or self.time_till) and not self._time_ok(rec.hhmm):
+            return False
+        ranged = self.dur_from is not None or self.dur_till is not None
+        if self.durations or ranged:
+            lo = self.dur_from if self.dur_from is not None else 0
+            hi = self.dur_till if self.dur_till is not None else 10 ** 6
+            if rec.minutes not in self.durations and not (ranged and lo <= rec.minutes <= hi):
+                return False
+        return True
+
+    def _time_ok(self, t: Tuple[int, int]) -> bool:
+        if t in self.times:
+            return True
+        if self.time_from is None and self.time_till is None:
+            return False
+        def minute(hm: Tuple[int, int]) -> int:
+            return hm[0] * 60 + hm[1]
+        at = minute(t)
+        lo = minute(self.time_from) if self.time_from else 0
+        hi = minute(self.time_till) if self.time_till else 23 * 60 + 59
+        return lo <= at <= hi if lo <= hi else (at >= lo or at <= hi)  # across midnight
+
+
+def _hhmm(text: str, range_end: bool) -> Tuple[int, int]:
+    """"20", "20h", "20:", "20:15", "20h15", "20-15" -- an hour alone is :00,
+    or :59 as the end of a range."""
+    m = re.fullmatch(r"(\d\d)(?:[:h-](\d\d)?)?", text)
+    if m is None or int(m.group(1)) > 23 or (m.group(2) and int(m.group(2)) > 59):
+        err("00017", f"'{text}' is not a time -- HH, HHh, HH:MM")
+    minute = int(m.group(2)) if m.group(2) else (59 if range_end else 0)
+    return int(m.group(1)), minute
+
+
+def parse_filters(args: Sequence[str]) -> Filters:
+    f = Filters()
+    day_at: Optional[datetime.date] = None
+    for a in args:
+        if a == ",":
+            err("00018", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's API answers no description")
+        if re.fullmatch(r"[@<>]\d{4}-\d\d-\d\d", a):
+            try:
+                day = datetime.date.fromisoformat(a[1:])
+            except ValueError:
+                err("00019", f"'{a}': no such date")
+            if a[0] == "@":
+                day_at = day
+            elif a[0] == ">":
+                if f.day_from:
+                    err("00020", f"'{a}': one >DATE only")
+                f.day_from = day
+            else:
+                if f.day_till:
+                    err("00021", f"'{a}': one <DATE only")
+                f.day_till = day
+        elif re.fullmatch(r"[@<>]\d\d(?:[:h-]\d\d|[:h])", a):
+            if a[0] == "@":
+                f.times.append(_hhmm(a[1:], False))
+            elif a[0] == ">":
+                f.time_from = _hhmm(a[1:], False)
+            else:
+                f.time_till = _hhmm(a[1:], True)
+        elif re.fullmatch(r"@[A-Za-z]{3}", a) and a[1:].lower() in WEEKDAYS:
+            f.weekdays.append(WEEKDAYS.index(a[1:].lower()))
+        elif re.fullmatch(r"[@<>]\d{1,3}", a):
+            n = int(a[1:])
+            if a[0] == "@":
+                f.durations.append(n)
+            elif a[0] == ">":
+                f.dur_from = n
+            else:
+                f.dur_till = n
+        elif a.startswith("@") and len(a) > 1:
+            f.channels.append(a[1:].lower())
+        elif a[:1] in ("<", ">"):
+            err("00022", f"'{a}' is no filter ({SCRIPT_NAME} --help lists them)")
+        else:
+            f.title.append(a)
+    if day_at:
+        if f.day_from or f.day_till:
+            err("00023", "@DATE together with <DATE or >DATE -- one or the other")
+        f.day_from = f.day_till = day_at
+    if not f.title:
+        err("00024", "search needs a TITLE (what you would type into otr.datenkeller.net's search box)")
+    return f
+
+
+def preference(cap: QualityCap) -> List[Quality]:
+    """The quality taken when a recording is offered in several: HQ, then the
+    small ones, then HD -- HD first only when OTR_QUALITY_CAP is HD."""
+    order: List[Quality] = ["HQ", "MP4", "DivX", "LQ", "HD"]
+    return ["HD", *order[:-1]] if cap == "HD" else order
+
+
+def pick_best(answer: str, filters: Filters, cap: QualityCap) -> Tuple[List[Recording], int]:
+    """The search answer ("<file>;<size>..." per line) -> the best name of each
+    recording the filters keep, oldest first; and how many files were offered."""
+    by_slot: Dict[Tuple[Slot, str], Dict[Quality, Recording]] = {}
+    offered = 0
+    for n, line in enumerate(answer.splitlines(), 1):
+        name = line.split(";", 1)[0].strip()
+        if not name:
+            continue
+        offered += 1
+        rec = parse_otr_name(name)
+        if rec is None:
+            err("00025", f"otr.datenkeller.net answered a line that is no OTR file (line {n}): {line[:100]}")
+        if rec.quality is None:
+            OUT.dbg(f"an add-on, not a recording: {name}")
+        elif not filters.keeps(rec):
+            OUT.dbg(f"filtered out: {name}")
+        else:
+            by_slot.setdefault((rec.slot, rec.title.lower()), {})[rec.quality] = rec
+    best = [next(by_slot[k][q] for q in preference(cap) if q in by_slot[k]) for k in sorted(by_slot)]
+    return best, offered
+
+
+# --- 4. HTTP, otr.datenkeller.net, aria2c ----------------------------------
+
+BROWSER_UA: Final = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+@dataclass(frozen=True)
+class Reply:
+    status: int
+    body: bytes
+
+    def text(self) -> str:
+        return self.body.decode("utf-8", "replace")
+
+    def obj(self, what: str) -> Dict[str, object]:
+        """The body as a JSON object -- parsed here, at the boundary."""
+        try:
+            data: object = json.loads(self.body)
+        except ValueError:
+            err("00026", f"{what}: no JSON in the answer [HTTP {self.status}]: {self.text()[:120]}")
+        if not isinstance(data, dict):
+            err("00027", f"{what}: the answer is no JSON object [HTTP {self.status}]")
+        return cast(Dict[str, object], data)
+
+
+def field_str(obj: Dict[str, object], key: str, what: str) -> str:
+    v = obj.get(key)
+    if not isinstance(v, str) or not v:
+        err("00028", f"{what}: the answer has no '{key}'")
+    return v
+
+
+def shown_url(url: str) -> str:
+    """A URL fit for a message: the API key, and any other secret in its query, as ***."""
+    return re.sub(r"(apikey|password|passw|token)=[^&]*", r"\1=***", url, flags=re.IGNORECASE)
+
+
+Transport = Callable[[urllib.request.Request, float], Reply]
+
+
+def _urllib_transport(req: urllib.request.Request, timeout: float) -> Reply:
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return Reply(r.status, r.read())
+    except urllib.error.HTTPError as e:
+        return Reply(e.code, e.read())
+
+
+_transport: Transport = _urllib_transport   # --run-tests puts a fake server here
+
+
+def fetch(method: str, url: str, *, json_body: Optional[Dict[str, str]] = None,
+          form: Optional[Sequence[Tuple[str, str]]] = None, headers: Optional[Dict[str, str]] = None,
+          via: Optional[Transport] = None, timeout: float = 30) -> Reply:
+    """The one way out to the network: a browser User-Agent (Cloudflare in
+    front of OTR refuses others), and no secret in any message."""
+    body: Optional[bytes] = None
+    head = {"User-Agent": BROWSER_UA, "Accept-Encoding": "identity", **(headers or {})}
+    if json_body is not None:
+        body, head["Content-Type"] = json.dumps(json_body).encode(), "application/json"
+    elif form is not None:
+        body, head["Content-Type"] = urllib.parse.urlencode(form).encode(), "application/x-www-form-urlencoded"
+    OUT.det(f" >>> {method} {shown_url(url)}")
+    try:
+        reply = (via or _transport)(urllib.request.Request(url, data=body, headers=head, method=method), timeout)
+    except (urllib.error.URLError, OSError) as e:
+        err("00029", f"{method} {urllib.parse.urlsplit(url).netloc}: no answer "
+                     f"({getattr(e, 'reason', None) or e}) -- is the network up?")
+    OUT.dbg(f"HTTP {reply.status}, {len(reply.body)} bytes")
+    return reply
+
+
+DK_SITE: Final = "https://otr.datenkeller.net"
+
+
+def datenkeller_api(s: Settings, query: str) -> str:
+    """Ask the datenkeller API. The URL carries the API key: it is built here
+    only, and leaves the process only in the request itself."""
+    key = urllib.parse.quote(s.secret("DATENKELLER_APIKEY"))
+    url = f"{DK_SITE}/?jdlAPI&account={urllib.parse.quote(s.secret('DATENKELLER_LOGIN'))}&apikey={key}&{query}"
+    reply = fetch("GET", url)
+    if reply.status >= 400:
+        err("00030", f"otr.datenkeller.net: HTTP {reply.status} for {shown_url(url)}")
+    return reply.text()
+
+
+def datenkeller_login(s: Settings, force: bool) -> None:
+    """A session at otr.datenkeller.net, kept in COOKIE_FILE (0600)."""
+    phase("logging in to otr.datenkeller.net")
+    jar_path = Path(s.cookie_file).expanduser()
+    if jar_path.exists() and not force:
+        OUT.det(f"    > logged in already ({jar_path}; -F logs in again)")
+        return
+    jar = http.cookiejar.MozillaCookieJar(str(jar_path))
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+    def via_jar(req: urllib.request.Request, timeout: float) -> Reply:
+        try:
+            with opener.open(req, timeout=timeout) as r:
+                return Reply(r.status, r.read())
+        except urllib.error.HTTPError as e:
+            return Reply(e.code, e.read())
+
+    via = via_jar if _transport is _urllib_transport else None    # a test's fake server keeps no cookies
+    fetch("GET", f"{DK_SITE}/", via=via)
+    # xajax's form: three values under one name -- hence pairs, not a dict
+    reply = fetch("POST", f"{DK_SITE}/index.php", via=via, headers={"Origin": DK_SITE, "Referer": f"{DK_SITE}/"},
+                  form=[("xjxfun", "spenderLogin"), ("xjxr", str(int(time.time() * 1000))),
+                        ("xjxargs[]", "S" + s.secret("DATENKELLER_LOGIN")),
+                        ("xjxargs[]", "S" + s.secret("DATENKELLER_PASSW")),
+                        ("xjxargs[]", "Se64182db4a8ab14dcaf986037092f6c0")])
+    if reply.status >= 400:
+        err("00031", f"otr.datenkeller.net login: HTTP {reply.status}")
+    old = os.umask(0o077)
+    try:
+        jar.save(ignore_discard=True)
+    finally:
+        os.umask(old)
+    OUT.det("    > logged in to otr.datenkeller.net")
+
+
+def name_of_line(line: str) -> str:
+    """A `get` input line -> the OTR file name: the name itself, or a URL whose
+    getFile=<name>, or last path part, is one."""
+    s = line.strip()
+    if "://" in s or s.startswith("/"):
+        u = urllib.parse.urlsplit(s)
+        cands = urllib.parse.parse_qs(u.query).get("getFile", []) + [u.path.rsplit("/", 1)[-1]]
+    else:
+        cands = [s]
+    for c in cands:
+        if parse_otr_name(c) is not None:
+            return c
+    err("00032", f"not an OTR file name, nor a URL of one: {s[:120]}")
+
+
+def download_link(s: Settings, name: str) -> str:
+    phase(f"asking for the download link of {name}")
+    answer = datenkeller_api(s, "getLinkFor=" + urllib.parse.quote(name))
+    m = re.search(r"^OK: (\S+)", answer, re.MULTILINE)
+    if m is None:
+        err("00033", f"otr.datenkeller.net gave no download link for {name}: {answer.strip()[:160]}")
+    return m.group(1)
+
+
+def aria2c(s: Settings, url: str, name: str, folder: Path) -> None:
+    """Download `url` as `name` into `folder`. The URL may carry a token, so it
+    goes to the downloader on stdin, never on its command line."""
+    phase(f"downloading {name}")
+    exe = shutil.which(s.dl_cmd)
+    if exe is None:
+        err("00034", f"OTR_DL_CMD '{s.dl_cmd}' not found")
+    cmd = [exe, *s.dl_params, "--input-file=-"]
+    OUT.det(f" >>> {shlex.join(cmd)}   (stdin: the URL, out={name})")
+    rc = subprocess.run(cmd, input=f"{url}\n  out={name}\n", text=True, cwd=folder).returncode
+    target = folder / name
+    if rc != 0:
+        err("00035", f"{Path(exe).name} failed [rc {rc}] on {name}")
+    if not target.is_file() or target.stat().st_size == 0 or unfinished(target):
+        err("00036", f"{Path(exe).name} ended [rc 0], but {target} is not complete")
+
+
+# --- 5. the OTR protocol ---------------------------------------------------
+# Written from OTR's own CLI decoder, release 2026-10-12.3 -- the REFERENCE,
+# never part of this repository (its code states no licence). An update is a
+# reviewed edit of this section; `my-otr update-check <ZIP>` lists what a new
+# release changed against REFERENCE_FILES and PROTOCOL below.
+
+OTR_API: Final = "https://api.onlinetvrecorder.com"
+OTR_KEYS: Final = "https://keys.onlinetvrecorder.com"
+OTR_QUELLE: Final = "https://www.onlinetvrecorder.com/quelle_web.php"
+ECIES_INFO: Final = "otr2-key-wrapping-v1"    # the HKDF info of the key wrapping
+OTR2_MAGIC: Final = b"\x8fOTR2\r\n\x1a"
+OTR2_PREAMBLE: Final = 20     # magic 8, version 2, flags 2, header length 4, reserved 4 -- little-endian
+OTR2_ALIGN: Final = 64        # the body starts on the next multiple of 64
+OTR2_SCHEME: Final = "AES-256-CTR"
+OTRKEY_MAGIC: Final = b"OTRKEYFILE"
+OTRKEY_HEADER: Final = 512
+OTRKEY_HEADER_KEY: Final = bytes.fromhex("EF3AB29CD19F0CAC5759C7ABD12CC92BA3FE0AFEBF960D63FEBD0F45")
+CONTAINER_EXT: Final = {"video/mp4": ".mp4", "video/x-msvideo": ".avi", "video/x-matroska": ".mkv",
+                        "video/mpeg": ".mpg", "application/zip": ".zip"}
+CHUNK: Final = 8 * 1024 * 1024    # a multiple of 8 (Blowfish) and of 16 (AES)
+
+REFERENCE_RELEASE: Final = "2026-10-12.3"
+REFERENCE_FILES: Final = {
+    "otr_cli_decoder.py": "aa1cc718686ea9f0ce9d69a172362616d7190945b14554a8bc155e668aa9d53c",
+    "otr2lib.py": "1fdb407033e3967c3e0207116829ed1d424d14b3edd06ec17763a655cd6031da",
+    "otrkey_blowfish.py": "ffccbff08fa46fde793c055552b221f15170aa177d5a85f762b419a6723588f2",
+    "otr2_watermark.py": "fbaa0ceb6fdf1ccdf8d905045bcad8f5a7fec75f535ac616fff7a68b71c7cdb6",
 }
-
-
-DEFAULT_VRBPFX="$$| >>> "
-DEFAULT_DBGPFX="$$| ~~~ "
-VRBPFX="$DEFAULT_VRBPFX"
-DBGPFX="$DEFAULT_DBGPFX"
-
-addVRBPFX() { "$c_sed" -e "s/^/$VRBPFX/" -e "s/\\\n/\\
-$VRBPFX/g"; }
-
-# echo() && forced_echo() = feko == print to stdout + stderr !
-eko() { [ $QUIET ]   && return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
-feko(){ local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX;
-                                                "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
-
-vrb() { [ $VRB ]     || return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
-dbg() { [ $DBG ]     || return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
-ddbg(){ [ $DEEPDBG ] || return; local nl="\n"; [ "$2" = "0" ] && nl=""; "$c_printf" "%s$nl" "$1"|addVRBPFX 1>&2; } # 2nd param is "0" -> avoid trailing NL
-
-
-err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
-NOW=""
-  local outp="@$( date +"%Y-%m-%d_%H%M.%S") ERROR $errCode [$exitCode]: $msg${NL}${NL}PWD='$(pwd)'${NL}${NL}After you double-checked that this is NOT because YOU are doing something wrong, THEN please do:${NL}  1.) Run your comand with full debug output: \"--deep-debug --debug --verbose\"${NL}      and catch the output in file: \"--log --log-file my-otr.log\"${NL}  2.) Send me an error report with description and the attached output file to quickhelp@gmail.com${NL}  3.) Be PATIENT and I will /try/ come back to you!${NL}"
-
-  VRBPFX="$$| "; feko "${NL}$outp"
-  [ $LOG_ERR_TO_SYSLOG ] && logger -t "$US" "$outp"
-  exit $exitCode;
-}
-
-
-cleanup() { local rc=$?;
-  [ $CLEANUP_DONE ] && return;
-  CLEANUP_DONE=1
-  exit $rc; # return does not suffice
-}
-
-urlencode() {
-  local old_wd="$(pwd)"
-  dbg "urlencode(): old_wd='$old_wd', HOME='$HOME'"
-  cd "$HOME"
-  # the value is NOT printed: urlencode() also encodes the APIKEY
-  dbg "urlencode(): echo <value>|\"$c_python3\" -c \"import urllib.parse; print( urllib.parse.quote(input()) )\""
-  echo "$1"|"$c_python3" -c "import urllib.parse; print( urllib.parse.quote(input()) )"; rc=$?;
-  cd "$old_wd";
-  dbg "urlencode(): rc='$rc'"
-  return "$rc";
-}
-
-
-# usage: datenkeller_api <CMD> <CMD_PARAMS> <QUERY>  -- QUERY without account/apikey, e.g. "suche=foo&details"
-# Writes the answer to TEMPFILE; sets API_CMD_SHOWN (the command with the key as '***') for messages.
-# The URL carries the APIKEY, so it goes to CMD on STDIN (--input-file=-), never on its argv where
-# any user on the machine reads it with ps; 'printf' is the shell builtin here, so it has no argv either.
-DK_API_URL="https://otr.datenkeller.net/?jdlAPI"
-datenkeller_api() { local cmd="$1" params="$2" query="$3" key;
-  key="$( urlencode "$DATENKELLER_APIKEY" )" || err 086 "urlencode of DATENKELLER_APIKEY failed"
-  API_CMD_SHOWN="\"$cmd\" $params --input-file=- <<< '$DK_API_URL&account=$DATENKELLER_LOGIN&apikey=***&$query'"
-  dbg "datenkeller_api(): $API_CMD_SHOWN"
-  # shellcheck disable=SC2086  # $params is a list of options, split on purpose
-  printf '%s\n' "$DK_API_URL&account=$DATENKELLER_LOGIN&apikey=$key&$query" | "$cmd" $params --input-file=- >"$TEMPFILE"
-}
-
-
-REDIRECT_TO_LOG=;
-redirectToLOG() {
-  [ -z "$LOG" ] && return;
-
-  if [ -n "$FORCED_LOGFILE" ]; then
-    dbg "Using LOGFILE provided by --log-file parameter '$FORCED_LOGFILE'!"
-    LOGFILE="$FORCED_LOGFILE";
-  fi
-
-  [ -z "$LOGFILE" ] && return;
-
-  [ -n "$MAX_NR_OF_LOGFILES_TO_KEEP" ] && LOGFILE="$LOGFILE.$( date +"%Y-%m-%d_%H%M.%S" )"
-
-  dbg "Redirectring stderr now to LOGFILE '$LOGFILE'!
-less \"$LOGFILE\"
-"
-  touch "$LOGFILE" || { rc=$?; m="FAILED [$rc] accessing logfile '$LOGFILE'."; logger -t mine "#$US: $m"; err 009 "$m"; }
-  exec 4<&2 && exec 2>>"$LOGFILE" || err 000
-  REDIRECT_TO_LOG=1;
-  # ^^ save stderr to descriptor #4 && redirect stderr > LOGFILE
-  #    but keep stdout + stdin open! :)
-}
-
-
-restoreOutput() {
-  [ -z "$LOG" ] && return
-  exec 2<&4 || err 001
-  # ^^ restore stdout and stderr
-  vrb "Restored stdout + stderr"
-}
-
-
-datenkeller_login() {
-  if [ -e "$COOKIE_FILE" ]; then
-    if [ -z "$FORCE" ]; then
-      vrb "Cookie file '$COOKIE_FILE' found --> not logging in again! (use --force to force login)"
-      return
-    else
-      vrb "Cookie file '$COOKIE_FILE' found, but you asked to '--force' --> Removing it + logging in again!"
-      rm "$COOKIE_FILE" || err 015
-    fi
-  fi
-
-  dbg "Creating a PHP session at otr.datenkeller.net..."
-  curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X GET  -b "" -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'sec-ch-ua-mobile: ?0' -H 'sec-ch-ua-platform: "macOS"' -H 'DNT: 1' -H 'Upgrade-Insecure-Requests: 1' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9' -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' -H 'Sec-Fetch-Dest: document' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' -d "" 'https://otr.datenkeller.net/' >/dev/null || err 021 "If you see this error, please check: Do you have internet ?"
-
-  dbg "Logging into otr.datenkeller.net..."
-  # The body carries the password, so it goes to curl on STDIN (--data @-), never on its argv (ps).
-  # 'printf' is the shell builtin here, so it has no argv either.
-  # shellcheck disable=SC2086  # $CURL_OPTS is a list of options, split on purpose
-  printf '%s' "xjxfun=spenderLogin&xjxr=$(get_xjxr)&xjxargs[]=S$DATENKELLER_LOGIN&xjxargs[]=S$DATENKELLER_PASSW&xjxargs[]=Se64182db4a8ab14dcaf986037092f6c0" |
-  curl $CURL_OPTS --cookie "$COOKIE_FILE" --cookie-jar "$COOKIE_FILE" -X POST  -H 'Host: otr.datenkeller.net' -H 'Connection: keep-alive' -H 'Cache-Control: max-age=0' -H 'sec-ch-ua: "Chromium";v="94", "Microsoft Edge";v="94", ";Not A Brand";v="99"' -H 'DNT: 1' -H 'content-type: application/x-www-form-urlencoded' -H 'If-Modified-Since: Sat, 1 Jan 2000 00:00:00 GMT' -H 'sec-ch-ua-mobile: ?0' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47' -H 'sec-ch-ua-platform: "macOS"' -H 'Accept: */*' -H 'Origin: https://otr.datenkeller.net' -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Referer: https://otr.datenkeller.net/' -H 'Accept-Encoding: gzip, deflate, br' -H 'Accept-Language: en-GB,en;q=0.9' --data @- 'https://otr.datenkeller.net/index.php' >/dev/null || err 022
-
-  vrb "Logged in."
-
-  return 0
-}
-
-
-#Usage: otrdecoder [-h] [-v] [-i FILE -e EMAIL -p PASSWORD] [-o DIRECTORY] [-f]
-#  -h            prints this screen
-#  -v            prints version
-#  -i FILE       use FILE as input file
-#  -e EMAIL      use EMAIL to fetch the key directly from otr
-#  -p PASSWORD   use PASSWORD to fetch the key directly from otr
-#  -o DIRECTORY  use DIRECTORY as output directory (default: .)
-#  -f            force overwriting of output file
-#
-# root@seven ~ # otrdecoder -v
-#OTR-Decoder
-#Version: 188
-#
-#####################################################################################
-#
-#2017-01-13_2230: otrtool:
-#OTR-Tool, v1.2.0
-#Missing argument: otrkey-file
-#
-#Usage: otrtool [-h] [-v] [-i|-f|-x|-y] [-u]
-#               [-k <keyphrase>] [-e <email>] [-p <password>]
-#               [-D <destfolder>] [-O <destfile>]
-#               <otrkey-file1> [<otrkey-file2> ... [<otrkey-fileN>]]
-#
-#MODES OF OPERATION
-#  -i | Display information about file (default action)
-#  -f | Fetch keyphrase for file
-#  -x | Decrypt file
-#  -y | Verify only
-#
-#FREQUENTLY USED OPTIONS
-#  -k | Do not fetch keyphrase, use this one
-#  -D | Output folder
-#  -O | Output file (overrides -D)
-#  -u | Delete otrkey-files after successful decryption
-#
-#See otrtool(1) for further information
-#
-decode_one_file() { INP_FILE="$1"; OUTP_DIR="$2"; # <<< needs to be global + uppercase for get_decode_cmd() !
-  case "$INP_FILE" in *.otr2) err 088 "'$INP_FILE' is an .otr2 -- OTR's new format (2026); the decode command (otrtool) reads .otrkey only. OTR's own decoder reads both: https://www.onlinetvrecorder.com/v2/software";; esac
-  DBGPFX="$DEFAULT_DBGPFX";
-  dbg "decode_one_file(): INP_FILE='$INP_FILE' OUTP_DIR='$OUTP_DIR'"
-  DBGPFX="$$|  ~  "
-  WD="$(/bin/pwd)"
-  dbg "Working directory: '$WD'"
-  if [ -z "$OUTP_DIR" -o "$OUTP_DIR" = "." ]; then OUTP_DIR="$WD" # working directory (pwd)
-  else
-    #cd "$OUTP_DIR" || err 061; # avoid cd within my-or && get_decode_cmd needs to take care of the target directory (OUTP_DIR)!
-    if [ ! -e "$INP_FILE" ]; then
-      local tmp="$WD/$INP_FILE"
-      [ ! -e "$tmp" ] && err 049 "Unable to find INP_FILE.
-  Tried '$INP_FILE'.
-  Tried '$tmp'"
-      ddbg "Updated INP_FILE to '$tmp'." 
-      INP_FILE="$tmp"
-    fi
-  fi
-  local filename=${INP_FILE##*/};     ## To get: filename (filename.tar.gz) (without path)
-  local basename="${filename%.*}";    ## To get: filename-without-LAST-suffix (filename.tar)
-  ddbg "decode_one_file(): INP_FILE without path and last suffix: '$basename'"
-  if [ -e "$OUTP_DIR/$basename" ]; then
-    ddbg "decode_one_file(): DECODE OUTPUT FILE '$OUTP_DIR/$basename' EXISTS! [FORCE='$FORCE']"
-    if [ -n "$FORCE" ]; then
-      dbg "DECODE OUTPUT FILE '$OUTP_DIR/$basename' found, but you asked to '--force' --> OVERWRITING!..."
-      rm "$OUTP_DIR/$basename" || err 069 "FAILED [$?] to: rm '$OUTP_DIR/$basename'"
-    fi
-  fi
-
-  cmd="$(get_decode_cmd)"
-  cmd_shown="$(OTR_PASSW='***'; get_decode_cmd)" # for messages: they reach the LOGFILE
-
-  #ddbg "///////////////////////////////////////////////////////////";
-  ddbg "$cmd_shown"
-  dbg "Decoding '$INP_FILE': eval '$cmd_shown' 2>&1";
-  outp="$(eval "$cmd" 2>&1)"; rc=$?;
-
-  if [ $rc -eq 0 ]; then
-    ddbg "$outp"
-    ddbg "SUCCESS. DECODED FILE WRITTEN TO: '$OUTP_DIR'\n"
-  else
-    # err 050 "FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd_shown':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
-    echo;
-    echo "WARNING !!!"
-    echo "WARNING: FAILED [$rc] to decode '$INP_FILE' into '$OUTP_DIR'. OUTPUT OF DECODE COMMAND '$cmd_shown':\n$outp\n^^^^^^^^^^^^^^^^^^^^^^^^^"
-  fi
-
-  return 0
-}
-
-
-
-otr_decode() {
-  echo "otr_decode(): OUTP_DIR='$OUTP_DIR', FILES='$FILES'"
-  [ -z "$OUTP_DIR" ] && OUTP_DIR="$DEFAULT_DECODE_OUTP_DIR" && feko "Defaulting to OUTPUT DIR '$OUTP_DIR'! (from DEFAULT_DECODE_OUTP_DIR in config file)\n\nWaiting 3 seconds!    ---    Press CTRL+C to abort" && sleep 3
-  [ -z "$OUTP_DIR$DEFAULT_DECODE_OUTP_DIR" ] && err 057 "'decode' command, but NO <OUTPUT-DIR> specified\nAND no DEFAULT_DECODE_OUTP_DIR in config file '$CONF_FILE' set!"
-
-  mkdir -p "$OUTP_DIR" || err 019 "mkdir -p \"$OUTP_DIR\""
-  #chown me:mine "$OUTP_DIR" || err 047 "chown me:mine \"$OUTP_DIR\""
-  #chmod 770 "$OUTP_DIR" || err 048 "chmod 750 \"$OUTP_DIR\""
-
-  if [ "$FILES" = "-" ]; then
-    while read a; do
-      vrb "'$a'"
-      decode_one_file "$a" "$OUTP_DIR";
-    done
-  else
-    while read a; do
-      vrb "'$a'"
-      decode_one_file "$a" "$OUTP_DIR";
-    done<<EOB
-$FILES
-EOB
-  fi
-
-  return 0
-}
-
-
-
-# USES:
-# # for datenkeller_search(): (used in the otr search-page)
-# FILTER_FIRST_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
-# FILTER_TITLE="";
-# FILTER_FROM_DATE="";
-# FILTER_TILL_DATE="";
-# 
-# # to filter AFTERWARDS on the results (via OUR_AWK_SCRIPT):
-# FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
-# FILTER_DESCRIPTION="";
-# FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
-# FILTER_FROM_TIME="";
-# FILTER_TILL_TIME="";
-# FILTER_WEEKDAYS=""; # used to collect @WEEKDAY (sep by SPACE)
-# FILTER_DURATIONS=""; # used to collect @DURATION (sep by SPACE)
-# FILTER_FROM_DURATION="";
-# FILTER_TILL_DURATION="";
-datenkeller_search() {
-  DBGPFX="$$|  ~  "
-  # instantiate DEFAULT values used for search_str (hence the local new variable!):
-  local search_str="$( urlencode "$FILTER_TITLE" )" || err 086 "urlencode \"$FILTER_TITLE\""
-  #local search_str="$(python3 -c "import urllib.parse as ul; def f(x): return ul.quote_plus(x); print(f\"$FILTER_TITLE\");")"
-
-  eko "Searching otr.datenkeller.net for \"$FILTER_TITLE\""
-  dbg "search_str='$search_str'"
-
-  ### STARTING SEARCH:
-  datenkeller_api "$SEARCH_CMD" "$SEARCH_CMD_PARAMS" "suche=$search_str&details&limit=-1" || err 072 "ERROR: FAILED [$?]: $API_CMD_SHOWN --> '$(cat "$TEMPFILE")'"
-  outp="$(cat "$TEMPFILE")"
-  dbg "datenkeller_search(): SEARCH_CMD outp = '$outp'"
-
-  [ -z "$outp" ] && err 083 "NO OUTPUT FROM: $API_CMD_SHOWN"
-
-  dbg "\"$GAWK_CMD\" -v DBG=$DEEPDBG -v FROM_DATE=\"$FILTER_FROM_DATE\" -v TILL_DATE=\"$FILTER_TILL_DATE\" -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TILL_TIME=\"$FILTER_TILL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TILL_DURATION=\"$FILTER_TILL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
-
-  tmp="$("$GAWK_CMD" -v DBG=$DEEPDBG -v FROM_DATE="$FILTER_FROM_DATE" -v TILL_DATE="$FILTER_TILL_DATE" -v CHANNELS="$FILTER_REMAINING_CHANNELS" -v DESCR="$FILTER_DESCRIPTION" -v TIMES="$FILTER_TIMES" -v FROM_TIME="$FILTER_FROM_TIME" -v TILL_TIME="$FILTER_TILL_TIME" -v WEEKDAYS="$FILTER_WEEKDAYS" -v DURATIONS="$FILTER_DURATIONS" -v FROM_DURATION="$FILTER_FROM_DURATION" -v TILL_DURATION="$FILTER_TILL_DURATION" -f "$OUR_AWK_SCRIPT" "$TEMPFILE" search)" || err 052 "'$GAWK_CMD' returned [$?]. Executing: \"$GAWK_CMD\" -v DBG=$DEEPDBG -v FROM_DATE=\"$FILTER_FROM_DATE\" -v TILL_DATE=\"$FILTER_TILL_DATE\" -v CHANNELS=\"$FILTER_REMAINING_CHANNELS\" -v DESCR=\"$FILTER_DESCRIPTION\" -v TIMES=\"$FILTER_TIMES\" -v FROM_TIME=\"$FILTER_FROM_TIME\" -v TILL_TIME=\"$FILTER_TILL_TIME\" -v WEEKDAYS=\"$FILTER_WEEKDAYS\" -v DURATIONS=\"$FILTER_DURATIONS\" -v FROM_DURATION=\"$FILTER_FROM_DURATION\" -v TILL_DURATION=\"$FILTER_TILL_DURATION\" -f \"$OUR_AWK_SCRIPT\" \"$TEMPFILE\" search"
-  [ -z "$tmp" ] && tmp_c=0 || tmp_c="$(( $(echo "$tmp"|wc -l) + 0 ))";
-  /usr/bin/printf "$tmp\n" || err 070 # use printf to avoid "echo: write error: Broken pipe". SEE: https://superuser.com/questions/554855/how-can-i-fix-a-broken-pipe-error
-
-  eko "Found $tmp_c hits."
-  dbg "Result of $GAWK_CMD (each line 1 hit): '$tmp'"
-  dbg "Done."
-
-  return 0
-}
-
-
-# uses DO_OTR_DECODE_AFTER_DL to decide if after DL follows an automatic DECODE or not.
-datenkeller_dl() { local url="$1";
-  DBGPFX="$$|  ~  "
-
-  OTRKEY_FILENAME="${url##*/}"
-  DECODED_FILENAME="${OTRKEY_FILENAME%.*}"
-  dbg "datenkeller_dl(): url = '$url'"
-  dbg "datenkeller_dl(): OTRKEY_FILENAME = '$OTRKEY_FILENAME'"
-  dbg "datenkeller_dl(): DECODED_FILENAME = '$DECODED_FILENAME'"
-
-  ### DUPLICATE CHECK:
-  if [ -e "$DECODED_FILENAME" ]; then 
-    VRBPFX="$$|  > "
-    if [ -z "$FORCE" ]; then
-      vrb "Decoded filename '$DECODED_FILENAME' already exists. Ignoring.\n$$|     Use --force to force redownloading + overwriting."
-       return 0;
-    else
-       vrb "Decoded filename '$DECODED_FILENAME' already exists. FORCING!\n$$|     BUT you provided --force to force redownloading + overwriting!" 
-    fi
-  fi
-
-  ### DO THE DOWNLOAD:
-  [ -x "$OTR_DL_CMD" ] || err 081 "OTR_DL_CMD '$OTR_DL_CMD' not found."
-  VRBPFX="$DEFAULT_VRBPFX"; eko "Downloading '$url'..."; VRBPFX="$$|  >  "
-  dbg "\"$OTR_DL_CMD\" $OTR_DL_CMD_PARAMS \"$url\""
-  "$OTR_DL_CMD" $OTR_DL_CMD_PARAMS "$url" || err 034 "ERROR: FAILED [$?]: $OTR_DL_CMD $OTR_DL_CMD_PARAMS \"$url\""
-  [ -s "$OTRKEY_FILENAME" ] || err 035
-
-  # an .otr2 (OTR's format since 2026) is KEPT as it is: the decode command
-  # (otrtool) reads .otrkey only -- said, never attempted
-  case "$OTRKEY_FILENAME" in *.otr2)
-    eko "Kept '$OTRKEY_FILENAME' as it is: an .otr2 -- no decoder for it here yet (otrtool reads .otrkey only)"
-    return 0;; esac
-
-  [ $DO_OTR_DECODE_AFTER_DL ] || return 0
-
-  ### DO THE DECODING:
-  eko "Decoding '$OTRKEY_FILENAME'...";
-  vrb "Decoding to '$DECODED_FILENAME'...";
-  decode_one_file "$OTRKEY_FILENAME" || err 036
-  [ -s "$DECODED_FILENAME" ] || err 037 "Decoded filename '$DECODED_FILENAME' should be non-empty file. But it's not. Please check."
-
-  return 0
-}
-
-
-# sets $RES !
-quality_of_fn() {
-  RES="";
-  case "$1" in
-    *"["[mM][pP][4]"]"*) RES="mp4";;
-    *"["[dD][iI][vV][xX]"]"*) RES="divx";;
-    *"["[Hh][dD]"]"*) RES="HD";;
-    *"["[Hh][qQ]"]"*) RES="HQ";;
-  esac
-  # ignore any hashtags (#tag#) and any 'comments/tags' in square-brackets including surrounding spacings:
-  case "$(echo "$1"|sed -e 's/[[:space:]]*#[a-zA-Z_0-9-]*\(#[a-zA-Z_0-9-]*\)*#[[:space:]]*//' -e 's/[[:space:]]*\[[^]]*][[:space:]]*//g')" in
-    *"TVOON_DE.mpg.mp4"*) RES="mp4";;
-    *"TVOON_DE.mpg.avi"*) RES="divx";;
-    *"TVOON_DE.mpg.HD.avi"*) RES="HD";;
-    *"TVOON_DE.mpg.HQ.avi"*|*"TVOON_DE.mpg.HQ.avi"*) RES="HQ";;
-    *".mpg.mp4") RES="mp4";;
-  esac
-  [ -z "$RES" ] && err 043 "quality_of_fn( \"$1\" ): Unable to determine QUALITY of this (otr) filename. This should not be. Please fix."
-}
-
-
-# sets $RES !
-better_quality() { local what="$1"; local compare_with="$2"; local cap_at="$3";
-  case "$what" in
-     "HD")   RES=0;; # there is nothing better than HD --> keep $what!
-     "HQ")   case "$cap_at" in "HQ"|"mp4"|"divx") RES=0;; esac;      # cap_at <= $what --> keep $what !
-             case "$compare_with" in "HD") RES=1;; esac;;            # what < compare_with --> take $compare_with !
-     "mp4")  case "$cap_at" in "mp4"|"divx") RES=0;; esac;           # cap_at <= $what --> keep $what !
-             case "$compare_with" in "HQ"|"HD") RES=1;; esac;;       # what < compare_with --> take $compare_with !
-     "divx") case "$cap_at" in "divx") RES=0;; esac;                 # cap_at <= $what --> keep $what !
-             case "$compare_with" in "HQ"|"HD"|"mp4") RES=1;; esac;; # what < compare_with --> take $compare_with !
-  esac
-  dbg "better_quality( what:'$1' compared_with:'$2' cap_at:'$3'): RES=$RES!"
-}
-
-
-# gets '$DECODED_FILENAME', sets '$existing_files': each line = 1 existing filename "in competition with (because potential duplicate of)" '$DECODED_FILENAME'
-set_existing_files() { local DECODED_FILENAME="$1"; 
-  decoded_fileBASE="$(echo "$DECODED_FILENAME"|sed -n 's|_TVOON_DE[.]mpg.*|_TVOON_DE.mpg|p')"; [ -z "$decoded_fileBASE" ] && err 039 "DECODED_FILENAME = '$DECODED_FILENAME'"
-  quality_of_fn "$DECODED_FILENAME"; [ -z "$RES" ] && err 040 "DECODED_FILENAME = '$DECODED_FILENAME'"; decoded_fileQUALITY=$RES; 
-  dbg "set_existing_files(): decoded_fileBASE = '$decoded_fileBASE'"
-  dbg "set_existing_files(): decoded_fileQUALITY = '$decoded_fileQUALITY'"
-
-  dbg "set_existing_files(): CALLING split_filename( \"$decoded_fileBASE\" )..."
-  split_filename="$( split_filenameBase "$decoded_fileBASE" )" || err 068 "FAILED [$?] Calling split_filenameBase '$decoded_fileBASE'\n(error code != 0, make sure to explicitly return 0 when successful).";
-  dbg "set_existing_files(): split_filename( \"$decoded_fileBASE\" ): GOT '$split_filename'"
-
-  dbg "set_existing_files(): CALLING get_alternate_local_filenames( \"$decoded_fileBASE\" \"$decoded_fileQUALITY\" $split_filename)..."
-  additional_files="$(get_alternate_local_filenames "$decoded_fileBASE" "$decoded_fileQUALITY" $split_filename)" || err 042 "FAILED [$?] Calling get_alternate_local_filenames '$decoded_fileBASE' '$decoded_fileQUALITY' '$split_filename'\n(error code != 0, make sure to explicitly return 0 when successful).";
-  if [ $VRB ]; then [ -n "$additional_files" ] && cnt="$(( $(echo "$additional_files"|wc -l) + 0 ))" || cnt=0; vrb "get_alternate_local_filenames(): $cnt hits"; [ -n "$additional_files" ] && echo "$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")"; fi;
-  if [ $DBG ]; then dbg "set_existing_files(): CALLING get_alternate_local_filenames( ... ): $( [ -z "$additional_files" ] && echo "NO additional_files found!" || echo "GOT additional_files:\n$(echo "$additional_files"|sed -e "s/^.*/   |\"&\"/")" )"; fi
-
-  existing_files="$( ls "$decoded_fileBASE"*.avi 2>/dev/null; ls "$decoded_fileBASE"*.mp4 2>/dev/null; echo "$additional_files" )"
-  dbg "set_existing_files(): $( [ -z "$existing_files" ] && echo "NO existing_files FOUND!" || echo "FOUND existing_files:\n$(echo "$existing_files"|sed -e "s/^.*/   |\"&\"/")" )";
-}
-
-
-# uses '$DECODED_FILENAME' and returns "1" if a DUPLICATE was found
-duplicate_check() { local DECODED_FILENAME="$1";
-  ### DUPLICATE CHECK:
-  if [ -e "$DECODED_FILENAME" ]; then 
-    if [ -z "$FORCE" ]; then
-      vrb "Decoded filename '$DECODED_FILENAME' already exists. Ignoring. (use --force to re-download + overwrite)"
-      return 1;
-    else
-      vrb "Decoded filename '$DECODED_FILENAME' already exists. FORCING! (due to --force parameter)"
-    fi
-  fi
-
-  ### DUPLICATE FILE (different quality) CHECK:
-  set_existing_files "$DECODED_FILENAME";
-  if [ -n "$existing_files" ]; then
-    existing_fileQUALITY="$(echo "$existing_files"|while read a; do quality_of_fn "$a"; echo "$RES"; done|xargs)"; [ -z "$existing_fileQUALITY" ] && err 041
-    dbg "duplicate_check(): existing_fileQUALITY = '$existing_fileQUALITY'"
-    i=0; for a in $existing_fileQUALITY; do better_quality "$a" "$decoded_fileQUALITY" "$OTR_QUALITY_CAP"; i=$(( $i + $RES )); done
-    dbg "duplicate_check(): decoded_fileQUALITY '$decoded_fileQUALITY' was better than #'$i' entries of existing_fileQUALITY '$existing_fileQUALITY'"
-    if [ $i -eq 0 ]; then
-      vrb "Decoded filename '$DECODED_FILENAME' WORSE /or/ EQUAL than existing file quality '$existing_fileQUALITY'. Ignoring."
-      return 1;
-    else
-      vrb "Decoded filename '$DECODED_FILENAME' BETTER than existing file quality '$existing_fileQUALITY'.\n$$|     Will redownload!"
-      return 0;
-    fi
-  else
-    vrb "Decoded filename '$DECODED_FILENAME': No existing files found --> Will redownload!"
-    return 0;
-  fi
-
-  err 045;
-}
-
-
-
-datenkeller_get() {
-  vrb "Downloading otr.datenkeller.net FILENAMEs. Reading from stdin!"
-  VRBPFX="$$|  >  "; DBGPFX="$$|  ~  "
-
-  total_cnt=0; duplicate_skip_cnt=0; download_cnt=0;
-  while read line; do
-    [ -n "$line" ] && total_cnt="$(( $total_cnt + 1 ))" || { dbg "IGNORED empty line (line count stays '$total_cnt')"; continue; }
-
-    dbg "read line #$total_cnt: '$line'"
-    case "$line" in
-      'https://otr.datenkeller.net/?getFile='*)  OTRKEY_FILENAME="$(echo "$line"|cut -c 38- )";;
-      'https://otr.datenkeller.net/queueForFile/'*)  OTRKEY_FILENAME="$(echo "$line"|cut -c 42- )";;
-      '/?getFile='*)                             OTRKEY_FILENAME="$(echo "$line"|cut -c 11- )";;
-      [a-zA-Z][a-zA-Z0-9_]*_TVOON_DE.*.otrkey)   OTRKEY_FILENAME="$line";;
-      [a-zA-Z][a-zA-Z0-9_]*_TVOON_DE.*.otr2)     OTRKEY_FILENAME="$line";;
-      *) err 030 "line = '$line'";;
-    esac
-      #20[0-9][0-9]-[0][1-9]-[0-3][0-9]"	"*)      url="$(echo "$line"|cut -f 8   )";;
-      #20[0-9][0-9]-[1][0-2]-[0-3][0-9]"	"*)      url="$(echo "$line"|cut -f 8   )";;
-
-    [ -z "$OTRKEY_FILENAME" ] && err 031
-    DECODED_FILENAME="${OTRKEY_FILENAME%.*}"
-    dbg "datenkeller_get(): OTRKEY_FILENAME = '$OTRKEY_FILENAME'"
-    dbg "datenkeller_get(): DECODED_FILENAME = '$DECODED_FILENAME'"
-
-    case "$OTRKEY_FILENAME" in
-      *.otr2)
-        # kept undecoded (see datenkeller_dl): the .otr2 itself is the result, so ANY
-        # quality of this recording already here, complete, makes this one a duplicate --
-        # one aria2c has not finished (its .aria2 beside it) is resumed, not skipped
-        rc=0; _o2_base="${OTRKEY_FILENAME%_TVOON_DE.*}_TVOON_DE."
-        for _o2 in "$_o2_base"*.otr2; do
-          [ -f "$_o2" ] && [ ! -e "$_o2.aria2" ] && [ -z "$FORCE" ] && { rc=1; vrb "'$_o2' is here already (an .otr2 of this recording). Ignoring."; break; }
-        done;;
-      *)
-        dbg "datenkeller_get(): CALLING duplicate_check '$DECODED_FILENAME'..."
-        duplicate_check "$DECODED_FILENAME"; rc=$?;; # returns 1 if DUPLICATE was found !
-    esac
-    case "$rc" in
-       1) duplicate_skip_cnt="$(( $duplicate_skip_cnt + 1 ))";
-          dbg "datenkeller_get(): duplicate_check on DECODED_FILENAME: YES, we have a duplicate! -->> SKIPPING ($duplicate_skip_cnt. time)!"
-          continue;;
-       0) dbg "datenkeller_get(): duplicate_check on DECODED_FILENAME: NO duplicate -->> so we can download now :)";;
-       *) err 044;;
-    esac
-
-    ### GET THE DOWNLOAD-LINK / DOWNLOAD_URL:
-    [ -x "$OTR_DL_CMD" ] || err 003 "OTR_DL_CMD '$OTR_DL_CMD' not found."
-    VRBPFX="$$| >>> "; vrb "Getting the download link for '$OTRKEY_FILENAME'..."; # we do NOT reset VRBPFX here, because we will next call datenkeller_dl() !
-    datenkeller_api "$GET_DLURL_CMD" "$GET_DLURL_CMD_PARAMS" "getLinkFor=$OTRKEY_FILENAME" || err 087 "ERROR: FAILED [$?]: $API_CMD_SHOWN --> '$(cat "$TEMPFILE")'"
-    outp="$(cat "$TEMPFILE")"
-    dbg "datenkeller_get(): GET_DLURL_CMD outp = '$outp'"
-    #
-    DLURL="$(echo "$outp"|sed -n 's/^OK: //p')" || err 073 "ERROR: FAILED [$?]: $API_CMD_SHOWN --> '$outp'"
-    [ -z "$DLURL" ] && err 074 "ERROR: $API_CMD_SHOWN --> '$outp' --> DLURL='$DLURL' empty... but why !? -- c_python3='$c_python3'."
-    dbg "datenkeller_get(): DLURL = '$DLURL'"
-
-    datenkeller_dl "$DLURL" || err 082 "FAILED [$?]: datenkeller_get(): download_cnt=$download_cnt. datenkeller_dl '$awk_outp'"
-    download_cnt="$(( $download_cnt + 1 ))";
-  done
-
-  [ $(( $download_cnt + $duplicate_skip_cnt )) -eq $total_cnt ] || err 067 "We read '$total_cnt' lines from stdin. Skipped '$duplicate_skip_cnt' lines. Downloaded '$download_cnt' lines. This should ADD UP (total = skipped + downloaded), but it does not!"
-  dbg "Done."
-  eko "DONE (successfully processed $total_cnt lines read from stdin: $duplicate_skip_cnt skipped, $download_cnt downloaded)" 
+# each thing this section relies on, as its text appears in the reference's source
+PROTOCOL: Final = {
+    "API host": OTR_API,
+    "key server": OTR_KEYS,
+    "otrkey key service": OTR_QUELLE,
+    "login endpoint": "/api/auth/login",
+    "ticket endpoint": "/api/otr2/ticket",
+    "key endpoint": "/key'",
+    "key request": "json={'rec': rec_id, 'token': ticket, 'client_pub': pub_b64}",
+    "key answer": "data['wrapped_cek']",
+    "content checksum": "'plaintext_sha256'",
+    "otrkey request": "'FN': filename, 'OH': otr_hash",
+    "otrkey answer": "'random_key'",
+    "ECIES layout": "wrapped[:65], wrapped[65:77], wrapped[77:]",
+    "ECIES curve": "SECP256R1",
+    "HKDF info": ECIES_INFO,
+    "otr2 magic": "b'\\x8fOTR2\\x0d\\x0a\\x1a'",
+    "otr2 preamble": "PREAMBLE_SIZE  = 20",
+    "otr2 alignment": "BODY_ALIGNMENT = 64",
+    "otr2 scheme": f'"{OTR2_SCHEME}"',
+    "otr2 counter": "nonce12 + block_index.to_bytes(4, 'big')",
+    "otrkey magic": "b'OTRKEYFILE'",
+    "otrkey header": "OTRKEY_HEADER_SIZE = 512",
+    "otrkey header key": "0xEF, 0x3A, 0xB2, 0x9C, 0xD1, 0x9F, 0x0C, 0xAC",
+    "otrkey Blowfish": "swap32(c.decrypt(swap32(data)))",
 }
 
 
-# usage: append <what> "to" <to_what> <separator>
-append() { local what="$1"; [ "$2" != "to" ] && err 062; local to_what="$3"; local separator="$4"; [ -z "$4" ] && separator=" ";
-           [ -z "$to_what" ] && echo "$what" || echo "$to_what$separator$what"; }
-
-rmStart() { echo "$2"|sed -e "s/^$1//"; }
-
-#FROM: https://www.rentokil.com.jm/hotels/xajax_js/xajax_core_uncompressed.js/
-# --> dNow = new Date(); xjxr = dNow.getTime()
-# -->
-#FROM: https://developer.mozilla.org/de/docs/Web/JavaScript/Reference/Global_Objects/Date/now
-# -->
-#FROM: https://apple.stackexchange.com/questions/135742/time-in-milliseconds-since-epoch-in-the-terminal
-get_xjxr() { r=$RANDOM; [ -z "$r" ] && r=0; date +"%s$(printf "%03d" "$(( $r % 1000 ))")"; }
+def _swap32(b: bytes) -> bytes:
+    """Every 4-byte word reversed: OTR's Blowfish loads its blocks little-endian."""
+    a = array.array("I")
+    assert a.itemsize == 4, "array 'I' must be 32 bits here"
+    a.frombytes(b)
+    a.byteswap()
+    return a.tobytes()
 
 
-#########################################################
-#### TESTS:  my-otr --run-tests [FILTER]   (TAP: the plan "1..N" first, then "ok K - name" / "not ok K - name")
-# Every network tool is a STUB that records its argv and stdin; fake secrets, no config, nothing leaves the machine.
+class OtrBlowfish:
+    """Blowfish-ECB as OTR's .otrkey uses it: the standard cipher on byte-swapped words."""
 
-RT_TESTS="t_search_key_off_argv t_get_key_off_argv t_login_passw_off_argv t_messages_hide_secrets t_api_url_built_once t_otr2_kept t_otr2_duplicate t_otr2_awk"
-RT_KEY='K3y+S/ecr=t'      # urlencode changes it, so the raw AND the encoded form are checked
-RT_KEY_ENC='K3y%2BS/ecr%3Dt'
-RT_PASSW='Pa55-w0rd'
+    def __init__(self, key: bytes) -> None:
+        from cryptography.hazmat.decrepit.ciphers.algorithms import Blowfish
+        from cryptography.hazmat.primitives.ciphers import Cipher, modes
+        self._cipher = Cipher(Blowfish(key), modes.ECB())
+        self._dec = self._cipher.decryptor()
 
-# shellcheck disable=SC2016  # the stubs' own $@, $(...) and ${a}, not ours
-rt_setup() {
-  RT_DIR="$(mktemp -d /tmp/my-otr-tests.XXXXXX)" || { echo "Bail out! mktemp failed"; exit 1; }
-  for _rs in wget curl; do
-    printf '#!/bin/sh\nprintf "%%s\\n" "$@" >>"%s/%s.argv"; cat >>"%s/%s.stdin"; cat "%s/%s.answer" 2>/dev/null; exit $(cat "%s/%s.rc" 2>/dev/null || echo 0)\n' \
-      "$RT_DIR" "$_rs" "$RT_DIR" "$_rs" "$RT_DIR" "$_rs" "$RT_DIR" "$_rs" >"$RT_DIR/$_rs"
-  done
-  printf '#!/bin/sh\necho hit\n' >"$RT_DIR/gawk"
-  printf '#!/bin/sh\nfor a; do :; done; echo data >"${a##*/}"\n' >"$RT_DIR/aria2c"
-  printf '#!/bin/sh\necho "otrtool: wrong password"; exit 3\n' >"$RT_DIR/otrtool"
-  chmod 755 "$RT_DIR/wget" "$RT_DIR/curl" "$RT_DIR/gawk" "$RT_DIR/aria2c" "$RT_DIR/otrtool"
-  : >"$RT_DIR/wget.argv"; : >"$RT_DIR/curl.argv"
-}
+    def decrypt(self, data: bytes) -> bytes:
+        return _swap32(self._dec.update(_swap32(data)))
 
-# run "$@" as my-otr would, all messages on (-V -D -DD), in a subshell (err exits); its stderr is what the LOGFILE gets
-rt_run() {
-  ( cd "$RT_DIR" || exit 1
-    PATH="$RT_DIR:$PATH"; QUIET=; VRB=1; DBG=1; DEEPDBG=1; LOG=; LOG_ERR_TO_SYSLOG=; FORCE=
-    DATENKELLER_LOGIN=tester; DATENKELLER_APIKEY="$RT_KEY"; DATENKELLER_PASSW="$RT_PASSW"; OTR_LOGIN=tester; OTR_PASSW="$RT_PASSW"
-    SEARCH_CMD="$RT_DIR/wget"; GET_DLURL_CMD="$RT_DIR/wget"; GAWK_CMD="$RT_DIR/gawk"; OTR_DL_CMD="$RT_DIR/aria2c"
-    TEMPFILE="$RT_DIR/tmp"; COOKIE_FILE="$RT_DIR/cookies"; FILTER_TITLE="bares fuer rares"; OUR_AWK_SCRIPT=/dev/null
-    "$@" ) >"$RT_DIR/out" 2>&1
-}
-
-# rt_has|rt_lacks FILE STRING WHAT
-rt_has()   { grep -qF -- "$2" "$1" 2>/dev/null || { echo "#   missing in ${1##*/}: $3"; RT_FAIL=1; }; }
-rt_lacks() { grep -qF -- "$2" "$1" 2>/dev/null && { echo "#   FOUND in ${1##*/}: $3"; RT_FAIL=1; }; return 0; }
-rt_no_key() { rt_lacks "$1" "$RT_KEY" "the API key"; rt_lacks "$1" "$RT_KEY_ENC" "the API key (urlencoded)"; }
-
-t_search_key_off_argv() {
-  echo row >"$RT_DIR/wget.answer"
-  rt_run datenkeller_search
-  rt_has "$RT_DIR/out" "Found 1 hits." "the search result"
-  rt_has "$RT_DIR/wget.argv" "--input-file=-" "wget's --input-file=-"
-  rt_no_key "$RT_DIR/wget.argv"
-  rt_has "$RT_DIR/wget.stdin" "apikey=$RT_KEY_ENC&suche=bares%20fuer%20rares" "the key, sent on stdin"
-  rt_no_key "$RT_DIR/out"
-}
-
-t_get_key_off_argv() {
-  printf 'OK: https://dl.invalid/Foo_TVOON_DE.mpg.HQ.avi.otrkey\n' >"$RT_DIR/wget.answer"
-  split_filenameBase() { echo x; }; get_alternate_local_filenames() { return 0; }
-  rt_run datenkeller_get <<EOF
-Foo_TVOON_DE.mpg.HQ.avi.otrkey
-EOF
-  rt_has "$RT_DIR/out" "1 downloaded" "the download"
-  rt_no_key "$RT_DIR/wget.argv"
-  rt_has "$RT_DIR/wget.stdin" "apikey=$RT_KEY_ENC&getLinkFor=Foo_TVOON_DE.mpg.HQ.avi.otrkey" "the key, sent on stdin"
-  rt_no_key "$RT_DIR/out"
-}
-
-t_login_passw_off_argv() {
-  rt_run datenkeller_login
-  rt_has "$RT_DIR/out" "Logged in." "the login"
-  rt_lacks "$RT_DIR/curl.argv" "$RT_PASSW" "the password"
-  rt_has "$RT_DIR/curl.stdin" "xjxargs[]=S$RT_PASSW" "the password, sent on stdin"
-}
-
-# a FAILING api call and a failing decode print their command: neither may carry a secret
-t_messages_hide_secrets() {
-  echo 8 >"$RT_DIR/wget.rc"
-  rt_run datenkeller_search
-  rt_has "$RT_DIR/out" "ERROR 072" "the error"
-  rt_has "$RT_DIR/out" "apikey=***" "the redacted key"
-  rt_no_key "$RT_DIR/out"
-  echo x >"$RT_DIR/a.otrkey"
-  eval "$(echo "$EXAMPLE_CONF" | sed -n "/^get_decode_cmd()/,/^}/p")"   # the decode command the shipped config defines
-  rt_run decode_one_file a.otrkey .
-  rt_has "$RT_DIR/out" "otrtool: wrong password" "the decode failure"
-  rt_lacks "$RT_DIR/out" "$RT_PASSW" "the OTR password"
-}
-
-# only datenkeller_api() may put the key into a URL: a second place would bypass it
-t_api_url_built_once() {
-  _n="$(awk '/^#### TESTS:/ { exit } /apikey=[$]/ { n++ } END { print n+0 }' "$0")"
-  [ "$_n" = "1" ] || { echo "#   'apikey=\$' found on $_n lines of the code, expected 1 (datenkeller_api)"; RT_FAIL=1; }
-}
-
-# an .otr2 is downloaded and KEPT: never handed to the decode command (otrtool reads .otrkey only)
-t_otr2_kept() {
-  printf 'OK: https://dl.invalid/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2\n' >"$RT_DIR/wget.answer"
-  DO_OTR_DECODE_AFTER_DL=1 rt_run datenkeller_get <<EOF
-Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2
-EOF
-  rt_has "$RT_DIR/out" "1 downloaded" "the download"
-  rt_has "$RT_DIR/out" "Kept 'Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2' as it is" "the file kept, said"
-  rt_lacks "$RT_DIR/out" "otrtool: wrong password" "a decode attempt (the otrtool stub's answer)"
-  [ -s "$RT_DIR/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2" ] || { echo "#   the .otr2 is not there"; RT_FAIL=1; }
-  echo x >"$RT_DIR/b.otr2"
-  rt_run decode_one_file b.otr2 .
-  rt_has "$RT_DIR/out" "ERROR 088" "--decode of an .otr2: refused, with the reason"
-}
-
-# any quality of a recording already here (complete) is a duplicate; an unfinished one is resumed
-t_otr2_duplicate() {
-  printf 'OK: https://dl.invalid/Foo_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2\n' >"$RT_DIR/wget.answer"
-  echo data >"$RT_DIR/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2"
-  rt_run datenkeller_get <<EOF
-Foo_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2
-EOF
-  rt_has "$RT_DIR/out" "1 skipped, 0 downloaded" "another quality of it, here already: skipped"
-  echo x >"$RT_DIR/Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2.aria2"
-  rt_run datenkeller_get <<EOF
-Foo_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2
-EOF
-  rt_has "$RT_DIR/out" "0 skipped, 1 downloaded" "the one here unfinished (.aria2 beside it): not a duplicate"
-}
-
-# the search awk: .otr2 names parsed, the best quality per recording picked, an add-on never offered
-t_otr2_awk() {
-  _awk="${0%/*}/my-otr.awk"; [ -r "$_awk" ] || { echo "#   no my-otr.awk beside $0"; RT_FAIL=1; return; }
-  command -v gawk >/dev/null 2>&1 || { echo "# SKIP: no gawk on this machine"; return; }
-  printf '%s\n' 'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2;400' 'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2;900' \
-    'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HD.otr2;2000' 'A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.mpg.AddOn.otr2;50' \
-    'B__Folge_2_26.10.06_22-15_zdf_45_TVOON_DE.LQ.otr2;300' 'C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey;200' \
-    'D__Folge_3_26.10.07_20-15_zdf_60_TVOON_DE.mpg.AddOn.otr2;50' >"$RT_DIR/in"   # D: an add-on only -- nothing to offer
-  gawk -v DBG= -f "$_awk" "$RT_DIR/in" search >"$RT_DIR/out" 2>&1
-  [ "$(sort "$RT_DIR/out" | tr '\n' ' ')" = "A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2 B__Folge_2_26.10.06_22-15_zdf_45_TVOON_DE.LQ.otr2 C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey " ] \
-    || { echo "#   the search picked: $(tr '\n' ' ' <"$RT_DIR/out")"; RT_FAIL=1; }
-}
-
-run_tests() { _rt_filter="$1"; _rt_list=""; _rt_n=0; _rt_k=0; _rt_bad=0
-  _rt_defs="$(grep -c '^t_[a-z0-9_]*() {' "$0")"   # a digit in a name (t_otr2_...) counts too
-  # shellcheck disable=SC2086  # split into words on purpose
-  set -- $RT_TESTS
-  [ "$_rt_defs" = "$#" ] || { echo "Bail out! $_rt_defs test functions defined, $# in RT_TESTS"; return 1; }
-  for _rt_t in $RT_TESTS; do case "$_rt_t" in *"$_rt_filter"*) _rt_list="$_rt_list $_rt_t"; _rt_n=$((_rt_n + 1));; esac; done
-  trap 'rm -rf "$RT_DIR"; exit 130' INT TERM HUP
-  echo "1..$_rt_n"
-  for _rt_t in $_rt_list; do
-    _rt_k=$((_rt_k + 1)); RT_FAIL=; rt_setup
-    "$_rt_t" </dev/null   # a stub reads stdin: never let it wait on a terminal
-    if [ -z "$RT_FAIL" ]; then echo "ok $_rt_k - $_rt_t"; else echo "not ok $_rt_k - $_rt_t"; _rt_bad=$((_rt_bad + 1)); fi
-    rm -rf "$RT_DIR"
-  done
-  [ "$_rt_bad" -eq 0 ]
-}
+    def encrypt(self, data: bytes) -> bytes:
+        """The way back -- for --run-tests."""
+        return _swap32(self._cipher.encryptor().update(_swap32(data)))
 
 
-#########################################################
-#### MAIN:
+@dataclass(frozen=True)
+class Otr2Header:
+    rec: str
+    nonce: bytes
+    size: int
+    content_type: str
+    body_offset: int
 
-[ "$1" = "--run-tests" ] && { run_tests "$2"; exit $?; }
 
-FORCED_CONF_FILE=""
-FORCED_LOGFILE=""
-state=0; for arg in "$@"; do
-#eko "arg='$arg'"
-  case "$state" in
-    0) #dbg "PRE CLI-PARAM-LOOP: [\$#:$#] arg='$arg'" 1>&2
-      case "$arg" in
-        -C|--conf) state=1; continue;; # COLLECT CONF_FILE if provided
-        -l|--log) LOG="1"; continue;; 
-        --log-file) state=2; continue;; # COLLECT FORCED_LOGFILE
-        -L|--no-log) LOG=""; continue;;
-        -Q|--quiet) QUIET=1; continue;;
-        -V|--verbose) VRB=1; continue;;
-        -D|--debug) DBG=1; VRB=1; continue;;
-        -DD|--deep-debug) DBG=1; DEEPDBG=1; VRB=1; continue;;
-        -F|--force) FORCE=1; continue;;
-      esac;;
-    1) [ -z "$arg" ] && echo "$EXAMPLE_CONF" && exit 0; FORCED_CONF_FILE="$arg"; state=0;;
-    2) [ -z "$arg" ] && err 066; FORCED_LOGFILE="$arg"; state=0;;
-    *) err 065;;
-  esac
-done
+def read_otr2_header(path: Path) -> Otr2Header:
+    with path.open("rb") as f:
+        pre = f.read(OTR2_PREAMBLE)
+        if len(pre) < OTR2_PREAMBLE or pre[:8] != OTR2_MAGIC:
+            err("00037", f"{path.name}: not an .otr2 file ({len(pre)} bytes of preamble) -- a broken download?")
+        version, hlen = int.from_bytes(pre[8:10], "little"), int.from_bytes(pre[12:16], "little")
+        if version != 1 or not 0 < hlen <= 64 * 1024:
+            err("00038", f"{path.name}: .otr2 version {version}, header {hlen} bytes -- not one my-otr knows")
+        try:
+            raw: object = json.loads(f.read(hlen))
+        except ValueError:
+            err("00039", f"{path.name}: the .otr2 header is no JSON")
+    if not isinstance(raw, dict):
+        err("00040", f"{path.name}: the .otr2 header is no JSON object")
+    h = cast(Dict[str, object], raw)
+    scheme, iv, size, ctype = h.get("scheme", OTR2_SCHEME), h.get("iv"), h.get("size", 0), h.get("content_type")
+    if scheme != OTR2_SCHEME or not isinstance(iv, str) or not isinstance(size, int):
+        err("00041", f"{path.name}: .otr2 scheme {scheme!r} -- my-otr knows {OTR2_SCHEME}")
+    try:
+        nonce = bytes.fromhex(iv)
+    except ValueError:
+        nonce = b""
+    if len(nonce) != 12:
+        err("00042", f"{path.name}: the .otr2 IV is not 12 bytes")
+    raw_end = OTR2_PREAMBLE + hlen
+    return Otr2Header(field_str(h, "rec", path.name), nonce, size,
+                      ctype if isinstance(ctype, str) else "video/mp4", raw_end + (-raw_end) % OTR2_ALIGN)
 
-dbg "$NOW :: EXEC $US_CALL";
-DBGPFX="$$|  ~  "
 
-dbg "PRE CLI-PARAM-LOOP --> VRB='$VRB', DBG='$DBG', DEEPDBG='$DEEPDBG', LOG='$LOG', QUIET='$QUIET', FORCE='$FORCE', FORCED_CONF_FILE='$FORCED_CONF_FILE' state='$state'" 1>&2
-if [ -n "$FORCED_CONF_FILE" ]; then
-  dbg "Using CONF_FILE provided via --conf parameter '$FORCED_CONF_FILE'!" 1>&2
-  CONF_FILE="$FORCED_CONF_FILE"
-fi
-[ "$state" -eq "1" ] && echo "$EXAMPLE_CONF" && exit 0; 
-[ -z "$CONF_FILE" ] && CONF_FILE="$DEFAULT_CONF_FILE";
-dbg "                   --> CONF_FILE='$CONF_FILE'" 1>&2
+def _otr_reason(r: Reply) -> str:
+    try:
+        data: object = json.loads(r.body)
+    except ValueError:
+        return r.text()[:160]
+    if isinstance(data, dict):
+        obj = cast(Dict[str, object], data)
+        return str(obj.get("message") or obj.get("error") or obj)[:160]
+    return str(data)[:160]
 
-# set up the trap for a clean exit:
-for i in 0 1 2 3 4 5 6 7 8 9; do trap "cleanup \"TRAP\" $i;" $i; done;
 
-# first read DEFAULT values for DBG + VRB from CONF_FILE !
-[ -s "$CONF_FILE" ] || err 004 "Missing CONFIG FILE '$CONF_FILE'. Please call with --help and read on '--conf' parameter!"
-. "$CONF_FILE" || err 006 "Failed reading CONFIG FILE '$CONF_FILE'."
+class OtrSession:
+    """The OTR account's keys: one login, one ticket and one key pair per run,
+    shared by every file it decodes. The private key never leaves this process."""
 
-# check some CONFIG FILE '$CONFIG_FILE' variables/parameters:
-[ "$DATENKELLER_LOGIN" = "$DEFAULT_SECRET" ] && err 075 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_LOGIN. But this variable is needed!"
-[ "$DATENKELLER_PASSW" = "$DEFAULT_SECRET" ] && err 076 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_PASSW. But this variable is needed!"
-[ "$DATENKELLER_APIKEY" = "$DEFAULT_SECRET" ] && err 077 "CONF_FILE: '$CONF_FILE' does not seem to set DATENKELLER_APIKEY. But this variable is needed!"
-[ "$OTR_LOGIN" = "$DEFAULT_SECRET" ] && err 078 "CONF_FILE '$CONF_FILE' does not seem to set OTR_LOGIN. But this variable is needed!"
-[ "$OTR_PASSW" = "$DEFAULT_SECRET" ] && err 079 "CONF_FILE '$CONF_FILE' does not seem to set OTR_PASSW. But this variable is needed!"
-[ -z "$COOKIE_FILE" ] && err 012 "CONF_FILE '$CONF_FILE' does not seem to set COOKIE_FILE. But this variable is needed!"
-[ -z "$DATENKELLER_LOGIN" ] && err 013 "CONF_FILE '$CONF_FILE' does not seem to set DATENKELLER_LOGIN. But this variable is needed!"
-[ -z "$DATENKELLER_PASSW" ] && err 014 "CONF_FILE '$CONF_FILE' does not seem to set DATENKELLER_PASSW. But this variable is needed!"
-[ -z "$GAWK_CMD" ] && err 080 "CONFIG FILE '$CONF_FILE' does not seem to set GAWK_CMD. But this variable is needed!"
-tmp="$( "$GAWK_CMD" --version 2>&1 )" || err 084 "GAWK_CMD '$GAWK_CMD' not found /or/ not executable. Please check GAWK_CMD in CONFIG FILE '$CONFIG_FILE'."
-"$GAWK_CMD" --version 2>&1 | grep -q "GNU Awk" || err 026 "Please check GAWK_CMD in CONFIG FILE '$CONFIG_FILE':${NL}Current value of GAWK_CMD: '$GAWK_CMD'. But this does not seem to be a GNU version of awk?!"
+    def __init__(self, s: Settings) -> None:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        self._s = s
+        self._jwt: Optional[str] = None
+        self._ticket: Optional[str] = None
+        self._ticket_exp = 0.0
+        self._priv = ec.generate_private_key(ec.SECP256R1())
 
-[ $# -eq 0 ] && usage
+    def _ticket_now(self) -> str:
+        if self._jwt is None:
+            phase("logging in to onlinetvrecorder.com")
+            r = fetch("POST", f"{OTR_API}/api/auth/login",
+                      json_body={"email": self._s.secret("OTR_LOGIN"), "password": self._s.secret("OTR_PASSW")})
+            if r.status == 401:
+                err("00043", "onlinetvrecorder.com refused the login -- check OTR_LOGIN / OTR_PASSW")
+            if r.status >= 400:
+                err("00044", f"onlinetvrecorder.com login: HTTP {r.status}: {_otr_reason(r)}")
+            self._jwt = field_str(r.obj("the OTR login"), "token", "the OTR login")
+        if self._ticket is None or time.time() > self._ticket_exp - 30:
+            r = fetch("GET", f"{OTR_API}/api/otr2/ticket", headers={"Authorization": f"Bearer {self._jwt}"})
+            if r.status >= 400:
+                err("00045", f"onlinetvrecorder.com ticket: HTTP {r.status}: {_otr_reason(r)}")
+            obj = r.obj("the OTR ticket")
+            exp = obj.get("exp")
+            self._ticket = field_str(obj, "ticket", "the OTR ticket")
+            self._ticket_exp = float(exp) if isinstance(exp, (int, float)) else time.time() + 3000
+        return self._ticket
 
-# for datenkeller_search(): (used in the otr search-page)
-FILTER_FIRST_CHANNEL=""; # THIS wil be used to collec the FIRST channel provided only -- will be set to "-", if MORE than 1 channel is provided
-FILTER_TITLE="";
-FILTER_FROM_DATE="";
-FILTER_TILL_DATE="";
+    def otr2_key(self, rec: str) -> Tuple[bytes, Optional[str]]:
+        """The content key of recording `rec`, and the plaintext's sha256 when OTR has one."""
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        pub = base64.b64encode(self._priv.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
+        r = fetch("POST", f"{OTR_KEYS}/key", json_body={"rec": rec, "token": self._ticket_now(), "client_pub": pub})
+        if r.status == 403:
+            err("00046", f"onlinetvrecorder.com: no right to recording {rec}: {_otr_reason(r)}")
+        if r.status == 404:
+            err("00047", f"onlinetvrecorder.com: recording {rec} is not on the key server")
+        if r.status >= 400:
+            err("00048", f"onlinetvrecorder.com key: HTTP {r.status}: {_otr_reason(r)}")
+        obj = r.obj("the OTR key")
+        try:
+            # ECIES: the server's ephemeral P-256 point (65) | nonce (12) | AES-GCM of the key
+            wrapped = base64.b64decode(field_str(obj, "wrapped_cek", "the OTR key"), validate=True)
+            eph = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), wrapped[:65])
+            kek = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=ECIES_INFO.encode()).derive(
+                self._priv.exchange(ec.ECDH(), eph))
+            cek = AESGCM(kek).decrypt(wrapped[65:77], wrapped[77:], None)
+        except (ValueError, TypeError) as e:
+            err("00049", f"onlinetvrecorder.com: the key of {rec} cannot be unwrapped ({type(e).__name__})")
+        sha = obj.get("plaintext_sha256")
+        return cek, (sha.lower() if isinstance(sha, str) and sha else None)
 
-# to filter AFTERWARDS on the results (via the awk script):
-FILTER_REMAINING_CHANNELS=""; # THIS will be used to collect the CHANNELS (separated by TAB) -- if MORE than 2 channels are provided!
-FILTER_DESCRIPTION="";
-FILTER_TIMES=""; # used to collect @TIME (sep by SPACE)
-FILTER_FROM_TIME="";
-FILTER_TILL_TIME="";
-FILTER_WEEKDAYS=""; # used to collect @WEEKDAY (sep by SPACE)
-FILTER_DURATIONS=""; # used to collect @DURATION (sep by SPACE)
-FILTER_FROM_DURATION="";
-FILTER_TILL_DURATION="";
+    def otrkey_key(self, fn: str, oh: str) -> bytes:
+        r = fetch("POST", OTR_QUELLE, form=[("email", self._s.secret("OTR_LOGIN")),
+                                            ("password", self._s.secret("OTR_PASSW")), ("FN", fn), ("OH", oh)])
+        obj = r.obj("the .otrkey key service")
+        if "error" in obj:
+            err("00050", f"onlinetvrecorder.com refused the key of {fn}: {obj.get('message') or obj['error']}")
+        try:
+            return bytes.fromhex(field_str(obj, "random_key", "the .otrkey key service"))
+        except ValueError:
+            err("00051", f"onlinetvrecorder.com: the key of {fn} is no hex string")
 
-CMD=""; ignore_params=""; state=1;
 
-while [ $# -gt 0 ]; do
-  arg="$1"; shift;
-  dbg "CLI-PARAM-LOOP: [\$#:$#] ignore_params = '$ignore_params'  state = '$state'   --   arg='$arg'" 1>&2
-  [ -z "$ignore_params" ] && case "$arg" in
-    -l|--log|-L|--no-log|-Q|--quiet|-V|--verbose|-D|--debug|-DD|--deep-debug|-F|--force) continue;; # IGNORE here as already detected above !
-    -C|--conf) [ -n "$FORCED_CONF_FILE" ] && shift; continue;; # also skip parameter of --conf !
-    --log-file) [ -n "$FORCED_LOGFILE" ] && shift; continue;;  # also skip parameter of --log-file !
-    --) ignore_params=1; continue;;
-    --search|--login|--get|--help) [ -n "$CMD" ] && err 055 "Only 1 CMD allowed. Call --help."; CMD="$( rmStart '--' "$arg" )"; continue;;
-    search|login|get) [ -n "$CMD" ] && err 060 "Only 1 CMD allowed. Call --help."; CMD="$arg"; continue;;
-    dl|download|--dl|--download) [ -n "$CMD" ] && err 010 "Only 1 CMD allowed. Call --help."; CMD="dl"; continue;;
-    decode|--decode) [ -n "$CMD" ] && err 008 "Only 1 CMD allowed. Call --help."; CMD="decode"; state=3; continue;;
+def otrkey_fields(path: Path) -> Dict[str, str]:
+    """The .otrkey header: "FN=...&OH=..." under OTR's fixed header key."""
+    with path.open("rb") as f:
+        head = f.read(len(OTRKEY_MAGIC) + OTRKEY_HEADER)
+    if len(head) < len(OTRKEY_MAGIC) + OTRKEY_HEADER or not head.startswith(OTRKEY_MAGIC):
+        err("00052", f"{path.name}: not an .otrkey file -- a broken download?")
+    text = OtrBlowfish(OTRKEY_HEADER_KEY).decrypt(head[len(OTRKEY_MAGIC):]).split(b"\0", 1)[0]
+    return dict(p.split("=", 1) for p in text.decode("latin-1").split("&") if "=" in p)
 
-    *.[oO][tT][rR][kK][eE][yY]) [ -n "$CMD" -a "$CMD" != "decode" ] && err 085 "Only 1 CMD allowed. Call --help."; CMD="decode"; state=3;
-                                LAST_FILE="$arg"; FILES="$( append "$arg" to "$FILES" "$NL" )"; continue;;
 
-    -*) err 020 "Invalid parameter '$arg'. Call --help.";;
+def decoded_name(path: Path) -> str:
+    """#16: OTR's name with the container's extension (`..._TVOON_DE.HQ.mp4`);
+    an .otrkey's name without its last suffix (`..._TVOON_DE.mpg.HQ.avi`)."""
+    if path.suffix.lower() == ".otrkey":
+        return path.stem
+    ext = CONTAINER_EXT.get(read_otr2_header(path).content_type, ".mp4")
+    return path.stem if path.stem.lower().endswith(ext) else path.stem + ext
 
-    @[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
-          [ -n "$FILTER_DATE" ] && err 046 "Only 1 @{date} filter allowed (already detected '$FILTER_DATE', now found '$arg'). Call --help.";
-          FILTER_DATE="$( rmStart '@' "$arg" )"; continue;;
-    "<"[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
-          [ -n "$FILTER_TILL_DATE" ] && err 023 "Only 1 <{date} filter allowed (already detected '$FILTER_TILL_DATE', now found '$arg'). Call --help.";
-          FILTER_TILL_DATE="$( rmStart '<' "$arg" )"; continue;;
-    ">"[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
-          [ -n "$FILTER_FROM_DATE" ] && err 024 "Only 1 >{date} filter allowed (already detected '$FILTER_FROM_DATE', now found '$arg'). Call --help.";
-          FILTER_FROM_DATE="$( rmStart '>' "$arg" )"; continue;;
 
-    @[0-9][0-9][h:-][0-9][0-9])
-          FILTER_TIMES="$( append "$(rmStart '@' "$arg"|tr 'h-' ':' )" to "$FILTER_TIMES" )"; continue;;
-    @[0-9][0-9][:h])
-          FILTER_TIMES="$( append "$(echo "$arg"|sed 's/[@]\(.*\)[:h]/\1/' )" to "$FILTER_TIMES" )"; continue;;
-    "<"[0-9][0-9][:h])
-          FILTER_TILL_TIME="$( append "$(echo "$arg"|sed 's/[<]\(.*\)[:h]/\1/' )" to "$FILTER_TILL_TIME" )"; continue;;
-    ">"[0-9][0-9][:h])
-          FILTER_FROM_TIME="$( append "$(echo "$arg"|sed 's/[>]\(.*\)[:h]/\1/' )" to "$FILTER_FROM_TIME" )"; continue;;
-    "<"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_TILL_TIME="$( append "$(rmStart '<' "$arg"|tr 'h-' ':' )" to "$FILTER_TILL_TIME" )"; continue;;
-    ">"[0-9][0-9][h:-][0-9][0-9])
-          FILTER_FROM_TIME="$( append "$(rmStart '>' "$arg"|tr 'h-' ':' )" to "$FILTER_FROM_TIME" )"; continue;;
+def decode_file(session: OtrSession, path: Path, outdir: Path) -> Tuple[Path, str]:
+    """Decode one .otr2 / .otrkey into `outdir`, written beside as .part and
+    renamed when complete; the source is removed then -- an .otr2 only when it
+    matches OTR's checksum, where OTR sent one. Returns the file and that check."""
+    phase(f"decoding {path.name}")
+    out = outdir / decoded_name(path)
+    part = out.with_name(out.name + ".my-otr.part")
+    try:
+        check = (_decode_otr2 if path.suffix.lower() == ".otr2" else _decode_otrkey)(session, path, part)
+        part.replace(out)
+    finally:
+        if part.exists():
+            part.unlink()
+    path.unlink()
+    return out, check
 
-    @[Mm][oO][nN]|@[Tt][Uu][eE]|@[Ww][Ee][Nn]|@[Tt][Hh][Uu]|@[Ff][Rr][Ii]|@[Ss][Aa][Tt]|@[Ss][Uu][Nn])
-          FILTER_WEEKDAYS="$( append "$( rmStart '@' "$arg" )" to "$FILTER_WEEKDAYS" )"; continue;;
 
-    @[0-9][0-9])
-          FILTER_DURATIONS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_DURATIONS" )"; continue;;
-    "<"[0-9][0-9])
-          [ -n "$FILTER_TILL_DURATION" ] && err 059 "Only 1 <{duration} filter allowed. Call --help.";
-          FILTER_TILL_DURATION="$( rmStart '<' "$arg" )"; continue;;
-    ">"[0-9][0-9])
-          [ -n "$FILTER_FROM_DURATION" ] && err 058 "Only 1 >{duration} filter allowed. Call --help.";
-          FILTER_FROM_DURATION="$( rmStart '>' "$arg" )"; continue;;
+def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    h = read_otr2_header(path)
+    have, want = path.stat().st_size, h.body_offset + h.size
+    if h.size and have < want:
+        # before the key is asked for: every key OTR hands out counts as a decode
+        err("00053", f"{path.name}: incomplete download ({have} of {want} bytes) -- no key asked for")
+    cek, sha_want = session.otr2_key(h.rec)
+    dec = Cipher(algorithms.AES(cek), modes.CTR(h.nonce + b"\0\0\0\0")).decryptor()
+    sha, done = hashlib.sha256(), 0
+    with path.open("rb") as src, part.open("wb") as dst:
+        src.seek(h.body_offset)
+        while True:
+            chunk = src.read(min(CHUNK, h.size - done) if h.size else CHUNK)
+            if not chunk:
+                break
+            plain = dec.update(chunk)
+            sha.update(plain)
+            dst.write(plain)
+            done += len(plain)
+        dst.flush()
+        os.fsync(dst.fileno())
+    if h.size and done != h.size:
+        err("00054", f"{path.name}: {done} of {h.size} bytes decoded")
+    if sha_want is None:
+        return f"{done} bytes, OTR sent no checksum"
+    if sha.hexdigest() != sha_want:
+        err("00055", f"{path.name}: the decoded content differs from the recording "
+                     f"(sha256 {sha.hexdigest()[:12]} != OTR's {sha_want[:12]}) -- the source is kept")
+    return f"sha256 {sha_want[:12]} = OTR's"
 
-    @*)
-          # collect FIRST @channel provided HERE !
-          if [ -z "$FILTER_FIRST_CHANNEL" ]; then FILTER_FIRST_CHANNEL="$( rmStart '@' "$arg" )";  
-          # switch from using FILTER_FIRST_CHANNEL to FILTER_REMAINING_CHANNELS!
-          else [ "$FILTER_FIRST_CHANNEL" != "-" ] && FILTER_REMAINING_CHANNELS="$FILTER_FIRST_CHANNEL" && FILTER_FIRST_CHANNEL="-";
-               # collect any further @channel provided HERE; sep by TAB!
-               FILTER_REMAINING_CHANNELS="$( append "$(rmStart '@' "$arg" )" to "$FILTER_REMAINING_CHANNELS" "	")"; fi; continue;;  
 
-    ,)    [ $state -eq 2 ] && err 051 "Only 1 parameter ',' allowed (to separate description from title). Call --help.";
-          [ $state -ne 1 ] && err 056
-          state=2; continue;;
-  esac
+def _decode_otrkey(session: OtrSession, path: Path, part: Path) -> str:
+    fields = otrkey_fields(path)
+    if not fields.get("OH"):
+        err("00056", f"{path.name}: the .otrkey header has no OH")
+    bf = OtrBlowfish(session.otrkey_key(fields.get("FN", path.name), fields["OH"]))
+    done = 0
+    with path.open("rb") as src, part.open("wb") as dst:
+        src.seek(len(OTRKEY_MAGIC) + OTRKEY_HEADER)
+        while True:
+            chunk = src.read(CHUNK)
+            if not chunk:
+                break
+            whole = len(chunk) - len(chunk) % 8
+            dst.write(bf.decrypt(chunk[:whole]) + chunk[whole:])   # a tail under 8 bytes is plain
+            done += len(chunk)
+        dst.flush()
+        os.fsync(dst.fileno())
+    return f"{done} bytes"
 
-  # depending on state we collect all remaining args (without further controls) to the dedicated variables:
-  case $state in
-    1) FILTER_TITLE="$( append "$arg" to "$FILTER_TITLE" )";;
-    2) FILTER_DESCRIPTION="$( append "$arg" to "$FILTER_DESCRIPTION" )";;
-    3) LAST_FILE="$arg"; FILES="$( append "$arg" to "$FILES" "$NL" )";;
-    *) err 053;;
-  esac
-done
 
-# Catch help CMD here, BEFORE we redirectToLOG ! ;)
-[ "$CMD" = "help" ] && usage;
+def update_check(zip_path: Path) -> int:
+    """What a new release of OTR's decoder changed against the reviewed one."""
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            files = {Path(n).name: z.read(n) for n in z.namelist() if n.endswith(".py")}
+    except (OSError, zipfile.BadZipFile) as e:
+        err("00057", f"{zip_path}: not a readable zip ({e})")
+    source = b"\n".join(files.values()).decode("utf-8", "replace")
+    m = re.search(r"__version__ = '([^']+)'", source)
+    OUT.result(f" >>> OTR's decoder {m.group(1) if m else '(no __version__)'}, against the reviewed {REFERENCE_RELEASE}:")
+    changed = 0
+    for name, sha in REFERENCE_FILES.items():
+        got = hashlib.sha256(files[name]).hexdigest() if name in files else None
+        if got != sha:
+            changed += 1
+            OUT.result(f"    > {name}: {'GONE' if got is None else 'changed'} -- review it"
+                       + ("  (the watermark: my-otr adds none, #15)" if name == "otr2_watermark.py" else ""))
+    for what, literal in PROTOCOL.items():
+        if literal not in source:
+            changed += 1
+            OUT.result(f"    > {what}: CHANGED -- '{literal}' is no longer in it")
+    OUT.result(f" >>> {changed} thing(s) to review" if changed else " >>> the same protocol -- nothing to do")
+    return 0
 
-redirectToLOG
-if [ $LOG ]; then
-  _vrbpfx="$VRBPFX";
-  #VRBPFX=""; eko "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%" 1>&2
-  VRBPFX="$$| ";
-  eko "____________________________________________________________";
-  eko "%%%%% $NOW :: EXEC $US_CALL";
-  #vrb ""
-  VRBPFX="$_vrbpfx"
-fi
 
-if [ $DBG ]; then
-  dbg "FILTER_TITLE: '$FILTER_TITLE'"
-  dbg "FILTER_DESCRIPTION: '$FILTER_DESCRIPTION'"
-  dbg "FILTER_TIMES: '$FILTER_TIMES'"
-  dbg "FILTER_FROM_TIME: '$FILTER_FROM_TIME'"
-  dbg "FILTER_TILL_TIME: '$FILTER_TILL_TIME'"
-  dbg "FILTER_DATE: '$FILTER_DATE'"
-  dbg "FILTER_FROM_DATE: '$FILTER_FROM_DATE'"
-  dbg "FILTER_TILL_DATE: '$FILTER_TILL_DATE'"
-  dbg "FILTER_FIRST_CHANNEL: '$FILTER_FIRST_CHANNEL'"
-  dbg "FILTER_REMAINING_CHANNELS: '$FILTER_REMAINING_CHANNELS'"
-  dbg "FILTER_DURATIONS: '$FILTER_DURATIONS'"
-  dbg "FILTER_FROM_DURATION: '$FILTER_FROM_DURATION'"
-  dbg "FILTER_TILL_DURATION: '$FILTER_TILL_DURATION'"
-  dbg "FILTER_WEEKDAYS: '$FILTER_WEEKDAYS'"
-  dbg "LAST_FILE: '$LAST_FILE'"
-  dbg "FILES: '$FILES'"
-  dbg "CMD: '$CMD'"
-fi
+# --- 6. commands -----------------------------------------------------------
 
-# CHECK COMMANDLINE PARAMETERS:
-#[ -n "$FILTER_FROM_DATE" -a -z "$FILTER_TILL_DATE" ] && err 027 "You provided >DATE without <DATE. Not possible. Call with --help."
-[ -z "$FILTER_FROM_DATE" -a -n "$FILTER_TILL_DATE" ] && err 028 "You provided <DATE without >DATE. Not possible. Call with --help."
-[ -n "$FILTER_DATE" -a -n "$FILTER_FROM_DATE$FILTER_TILL_DATE" ] && err 054 "You provided @DATE AND either <DATE or >DATE. Not possible. Call with --help."
-if [ -n "$FILTER_DATE" ]; then
-  dbg "FILTER_DATE '$FILTER_DATE' provided --> setting FILTER_FROM_DATE + FILTER_TILL_DATE to FILTER_DATE."
-  FILTER_FROM_DATE="$FILTER_DATE" && FILTER_TILL_DATE="$FILTER_DATE"
-fi
-case "$CMD" in
-  "login"|"get"|"dl"|"decode") [ -n "$FILTER_TITLE" ] && err 016 "Invalid parameter '$FILTER_TITLE' for <COMMAND> '$CMD'. Call with --help.";
-                               [ -n "$FILTER_DESCRIPTION" ] && err 002 "Invalid parameter '$FILTER_DESCRIPTION' for <COMMAND> '$CMD'. Call with --help.";
-                               if [ "$CMD" = "decode" ]; then
-                                 # 1 file and no directory: [ "$LAST_FILE" = "$FILES" ] && err 007
-                                 if [ -d "$LAST_FILE" ] || [ "$LAST_FILE" = "." ]; then OUTP_DIR="$LAST_FILE" && FILES="$(echo "$FILES"|sed -e '$ d')" || err 005 "FAILED [$?] with sed (FILES='$FILES')"; fi;
-                               fi;;
-  "search") [ -z "$FILTER_TITLE" ] && err 017 "No FILTER_TITLE parameter(s) provided, but <COMMAND> '$CMD' needs it. Call with --help.";;
-  *) err 018 "Invalid <COMMAND> '$CMD'. Please contact author of this script.";;
-esac
+def cmd_search(s: Settings, args: Sequence[str]) -> int:
+    filters = parse_filters(args)
+    title = " ".join(filters.title)
+    phase(f"searching for \"{title}\"")
+    OUT.msg(f" >>> searching otr.datenkeller.net for \"{title}\"")
+    answer = datenkeller_api(s, f"suche={urllib.parse.quote(title)}&details&limit=-1")
+    if not answer.strip():
+        err("00058", f"otr.datenkeller.net answered nothing for \"{title}\"")
+    best, offered = pick_best(answer, filters, s.quality_cap)
+    for rec in best:
+        OUT.result(rec.name)
+    OUT.msg(f"    > {len(best)} recording(s) [{offered} file(s) offered]")
+    return 0
 
-### DO IT / DOIT:
 
-# FIND OUR_AWK_SCRIPT:
-if [ -z "$OUR_AWK_SCRIPT" ]; then
-  for a in ./my-otr.awk ~/.my-otr.awk; do
-    [ -s "$a" ] && OUR_AWK_SCRIPT="$a"
-  done
-fi
-[ -z "$OUR_AWK_SCRIPT" ] && err 063 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
-[ -s "$OUR_AWK_SCRIPT" ] || err 064 "Unable to find 'my-otr.awk'. Please place this${NL} * either in the same dir as my-otr${NL} * or in ~/.my-otr.awk${NL}${NL}OR set OUR_AWK_SCRIP in the config file '$CONF_FILE'."
-dbg "Using OUR_AWK_SCRIPT = '$OUR_AWK_SCRIPT'"
+@dataclass
+class Tally:
+    read: int = 0
+    skipped: int = 0
+    downloaded: int = 0
+    decoded: int = 0
+    failed: List[str] = field(default_factory=lambda: [])
 
-case "$CMD" in
-  "login") datenkeller_login;;
-  "search") datenkeller_search;;
-  "decode") otr_decode;;
-  "dl") DO_OTR_DECODE_AFTER_DL=""; datenkeller_login; datenkeller_get;;
-  "get") DO_OTR_DECODE_AFTER_DL="1"; datenkeller_login; datenkeller_get;;
-  *) err 011 "Unknown COMMAND '$CMD'. Should not be, contact author of this tool.";;
-esac
 
-VRBPFX="$$| ";
-eko "%%%%% $(date +"%Y-%m-%d_%H%M.%S") Success."
+def cmd_get(s: Settings, decode: bool, force: bool) -> int:
+    """Download the names (or URLs) on stdin into the current folder; then,
+    unless --no-decode, decode every complete OTR file in it (#17)."""
+    folder = Path.cwd()
+    phase("reading the names on stdin")
+    lines = [ln for ln in sys.stdin.read().splitlines() if ln.strip()]
+    names = [name_of_line(ln) for ln in lines]   # every line checked before anything is fetched
+    t = Tally(read=len(names))
+    if names:
+        datenkeller_login(s, force)
+    for name in names:
+        rec = parse_otr_name(name)
+        assert rec is not None, "name_of_line returns names that parse"
+        if rec.quality is None:
+            OUT.det(f"    > {name}: an add-on, not a recording -- skipped")
+            t.skipped += 1
+            continue
+        here = None if force else as_good_here(rec, rec.quality, folder, s.quality_cap)
+        if here is not None:
+            OUT.det(f"    > {name}: here already as {here[0].name} [{here[1]}] -- skipped")
+            t.skipped += 1
+            continue
+        try:
+            url = download_link(s, name)
+            OUT.msg(f" >>> downloading {name}")
+            aria2c(s, url, name, folder)
+            t.downloaded += 1
+        except OtrError as e:
+            OUT.error(f"ERROR {e.code} [1]: {e.text}")
+            t.failed.append(name)
+    if decode:
+        decode_all(s, sorted(p for p in folder.iterdir() if _kept_recording(p)), folder, force, t)
+    OUT.msg(f" >>> {t.read} read: {t.skipped} skipped (here already), {t.downloaded} downloaded, "
+            + (f"{t.decoded} decoded" if decode else "none decoded (--no-decode)")
+            + (f", {len(t.failed)} FAILED" if t.failed else ""))
+    if t.failed:
+        err("00059", f"{len(t.failed)} failed: " + ", ".join(t.failed))
+    return 0
 
-exit 0
 
+def _kept_recording(p: Path) -> bool:
+    """An OTR recording here, complete, to be decoded: never an add-on, never
+    one aria2c is still writing."""
+    if p.suffix.lower() not in (".otr2", ".otrkey") or not p.is_file() or unfinished(p):
+        return False
+    rec = parse_otr_name(p.name)
+    return rec is not None and rec.quality is not None
+
+
+def decode_all(s: Settings, files: Sequence[Path], outdir: Path, force: bool, t: Tally) -> None:
+    """Decode each file; one that fails is named and the next one goes on."""
+    session: Optional[OtrSession] = None
+    for path in files:
+        try:
+            if not path.is_file():
+                err("00060", f"{path}: no such file")
+            out = outdir / decoded_name(path)
+            if out.exists() and not force:
+                OUT.msg(f"    > {path.name}: decoded already as {out.name} -- left as it is (-F decodes again)")
+                t.skipped += 1
+                continue
+            session = session or OtrSession(s)
+            written, check = decode_file(session, path, outdir)
+            OUT.msg(f" >>> decoded {written.name} [{check}]")
+            t.decoded += 1
+        except OtrError as e:
+            OUT.error(f"ERROR {e.code} [1]: {e.text}")
+            t.failed.append(path.name)
+
+
+def cmd_decode(s: Settings, args: Sequence[str], force: bool) -> int:
+    """decode <FILE>.. [<DIR>]: a last argument that is a directory is where it writes."""
+    items = list(args)
+    if items == ["-"]:
+        phase("reading the names on stdin")
+        items = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+    if len(items) > 1 and Path(items[-1]).is_dir():
+        outdir = Path(items.pop())
+    elif s.decode_dir:
+        outdir = Path(s.decode_dir).expanduser()
+        OUT.msg(f" >>> writing into {outdir} (DEFAULT_DECODE_OUTP_DIR)")
+        outdir.mkdir(parents=True, exist_ok=True)
+    else:
+        err("00061", "decode: no <DIR> given, and DEFAULT_DECODE_OUTP_DIR is not set")
+    if not items:
+        err("00062", "decode: no file given")
+    t = Tally(read=len(items))
+    decode_all(s, [Path(i) for i in items], outdir, force, t)
+    if t.failed:
+        err("00063", f"{len(t.failed)} of {t.read} failed: " + ", ".join(t.failed))
+    return 0
+
+
+def version_line() -> str:
+    """The exact build: the version; git's describe where this file is tracked
+    in its OWN repository (else the stamped commit); the hash of the bytes."""
+    me = Path(os.path.realpath(__file__))
+    build = hashlib.sha256(me.read_bytes()).hexdigest()[:12]
+    desc = SCRIPT_COMMIT
+
+    def git(*a: str) -> str:
+        r = subprocess.run(["git", "-C", str(me.parent), *a], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    try:
+        if git("remote", "get-url", "origin").endswith((REPOSITORY, REPOSITORY + ".git")) \
+                and git("ls-files", me.name) == me.name:
+            desc = git("describe", "--tags", "--long", "--always", "--dirty") or desc
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return f"{SCRIPT_NAME} {SCRIPT_VERSION} ({desc}, build {build})"
+
+
+HELP: Final = f"""\
+usage: {SCRIPT_NAME} [OPTIONS] <COMMAND> [<ARGS>]
+
+Search otr.datenkeller.net, download with aria2c, and decode OTR's .otr2 and
+.otrkey files. Results go to stdout; everything else to stderr and the LOGFILE.
+
+COMMANDS
+  search <TITLE..> [<FILTER>..]   the best file of each recording, oldest
+                                  first, one name per line. FILTERs ('@' ones
+                                  may repeat; quote those with < and >):
+      @<channel>                    on this channel (as otr.datenkeller.net names it)
+      '>2026-01-31' '<2026-03-01'   on or after / on or before the day
+      @2026-02-14                   on the day
+      @20h @20:15                   starting at
+      '>20h' '<22:30'               starting from / until -- '>22h' '<02h'
+                                    spans midnight
+      @Mon .. @Sun                  on the weekday
+      @45 '>90' '<30'               lasting exactly / at least / at most N minutes
+  get [--no-decode]               download the names (or URLs) on stdin into
+                                  the current folder -- not one whose copy
+                                  here is as good -- then decode every complete
+                                  .otr2 / .otrkey in it; --no-decode: download only
+  dl                              the same as get --no-decode
+  decode <FILE>.. [<DIR>]         decode into DIR (else DEFAULT_DECODE_OUTP_DIR);
+                                  FILE '-': the names on stdin
+  login                           log in to otr.datenkeller.net (get does)
+  update-check <ZIP>              what a new release of OTR's decoder changed in
+                                  the protocol my-otr speaks
+
+  Decoding removes the source once the result is complete and -- where OTR
+  sends one -- matches its checksum. The quality taken: HQ, then the small
+  ones, then HD (HD first with OTR_QUALITY_CAP="HD").
+
+OPTIONS
+  -Q, --quiet              nothing on the terminal but results and errors
+  -V, --verbose            also each request, and each skip with its reason
+  -D, --debug              also the diagnostics (~~~); implies -V
+  -F, --force              log in, download and decode again what is here
+  -l, --log / -L, --no-log   keep the LOGFILE record / keep none
+  --log-file <FILE>        record into FILE (implies -l)
+  --config <FILE>          read FILE instead of searching for one
+  --create-config [<FILE>] the default config, to stdout or into a new FILE
+  --run-tests [<FILTER>]   the built-in tests (TAP) -- all, or those whose name holds FILTER
+  --version                the exact build
+  -h, --help               this
+
+  The old spellings --search --get --dl --download --decode --login still work.
+
+CONFIG  KEY="value" lines, read and never run -- the first found of
+  $MY_OTR_CONFIG, --config <FILE>,
+  {', '.join(str(p).replace(str(Path.home()), "~", 1) for p in config_search_paths())}
+  A <FILE>.GLOBAL beside it is read first, the file itself on top.
+
+EXAMPLES
+  {SCRIPT_NAME} search "bares fuer rares" @zdf '>2026-02-28' @15:05
+  {SCRIPT_NAME} search "bares fuer rares" | {SCRIPT_NAME} get"""
+
+COMMANDS: Final = {"search": "search", "get": "get", "dl": "dl", "download": "dl", "decode": "decode",
+                   "login": "login", "update-check": "update-check", "help": "help"}
+# the spellings my-otr-refresh and my-dl-helper call the sh version by
+LEGACY: Final = {"--search", "--get", "--dl", "--download", "--decode", "--login"}
+
+
+@dataclass
+class Cli:
+    command: Optional[str] = None
+    args: List[str] = field(default_factory=lambda: [])
+    quiet: Optional[bool] = None
+    vrb: Optional[bool] = None
+    dbg: Optional[bool] = None
+    force: Optional[bool] = None
+    log: Optional[bool] = None
+    log_file: Optional[str] = None
+    config: Optional[str] = None
+    no_decode: bool = False
+
+
+def parse_cli(argv: Sequence[str]) -> Cli:
+    """Options anywhere (as callers put them after the command); '--' ends them."""
+    c = Cli()
+    it = iter(argv)
+    rest = False
+    for a in it:
+        if rest or not a.startswith("-") or a == "-":
+            if c.command is None:
+                if a not in COMMANDS:
+                    hint = f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else ""
+                    err("00064", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
+                c.command = COMMANDS[a]
+            else:
+                c.args.append(a)
+            continue
+        key, eq, val = a.partition("=")
+        if a == "--":
+            rest = True
+        elif a in LEGACY:
+            if c.command is not None:
+                err("00065", f"one command only -- '{c.command}' and '{a}'")
+            c.command = COMMANDS[a[2:]]
+        elif a in ("-Q", "--quiet"):
+            c.quiet = True
+        elif a in ("-V", "--verbose"):
+            c.vrb = True
+        elif a in ("-D", "--debug"):
+            c.dbg = True
+        elif a in ("-F", "--force"):
+            c.force = True
+        elif a in ("-l", "--log"):
+            c.log = True
+        elif a in ("-L", "--no-log"):
+            c.log = False
+        elif key in ("--log-file", "--config"):
+            v = val if eq else next(it, None)
+            if not v:
+                err("00066", f"{key} needs a <FILE>")
+            if key == "--config":
+                c.config = v
+            else:
+                c.log_file, c.log = v, True
+        elif a == "--no-decode":
+            c.no_decode = True
+        elif a in ("-h", "--help"):
+            c.command = "help"
+        else:
+            verb = a.lstrip("-")
+            hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
+            err("00067", f"no such option '{a}'{hint}")
+    if c.no_decode and c.command != "get":
+        err("00068", "--no-decode goes with 'get'")
+    return c
+
+
+def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
+    OUT.dbg_on = c.dbg if c.dbg is not None else s.dbg
+    OUT.vrb = OUT.dbg_on or (c.vrb if c.vrb is not None else s.vrb)
+    OUT.quiet = (c.quiet if c.quiet is not None else s.quiet) and not OUT.vrb   # -V beats -Q
+    if c.log if c.log is not None else s.log:
+        logfile = Path(c.log_file or s.logfile).expanduser()
+        try:
+            logfile.parent.mkdir(parents=True, exist_ok=True)
+            OUT.log = logfile.open("a", encoding="utf-8")
+        except OSError as e:
+            err("00069", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+        OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
+
+
+def create_config(target: Optional[str]) -> int:
+    if target is None:
+        sys.stdout.write(DEFAULT_CONFIG)
+        return 0
+    p = Path(target)
+    try:
+        with p.open("x", encoding="utf-8") as f:
+            f.write(DEFAULT_CONFIG)
+    except FileExistsError:
+        err("00070", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+    OUT.msg(f" >>> wrote the default config to {p}")
+    return 0
+
+
+def run(argv: Sequence[str]) -> int:
+    first, _, value = (argv[0] if argv else "").partition("=")
+    if first == "--run-tests":
+        return run_tests(argv[1] if len(argv) > 1 else "")
+    if first == "--version":
+        OUT.result(version_line())
+        return 0
+    if first == "--create-config":
+        return create_config(value or (argv[1] if len(argv) > 1 else None))
+    c = parse_cli(argv)
+    if c.command in (None, "help"):
+        OUT.result(HELP)
+        return 0
+    if c.command == "update-check":
+        if len(c.args) != 1:
+            err("00071", "update-check needs the <ZIP> of OTR's decoder")
+        return update_check(Path(c.args[0]))
+    s = load_settings(c.config)
+    setup_output(s, c, argv)
+    force = c.force if c.force is not None else s.force
+    if c.command == "search":
+        return cmd_search(s, c.args)
+    if c.command == "decode":
+        return cmd_decode(s, c.args, force)
+    if c.args:
+        err("00072", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+    if c.command == "login":
+        datenkeller_login(s, force)
+        return 0
+    return cmd_get(s, decode=c.command == "get" and not c.no_decode, force=force)
+
+
+def trace_file() -> Path:
+    """Beside the LOGFILE when there is one, else in the temp directory."""
+    log = Path(OUT.log.name) if OUT.log is not None else None
+    folder = log.parent if log is not None and os.access(log.parent, os.W_OK) else Path(tempfile.gettempdir())
+    return folder / f"{SCRIPT_NAME}.{datetime.datetime.now():%Y-%m-%d_%H%M%S}.{os.getpid()}.trace"
+
+
+def main(argv: Sequence[str]) -> int:
+    """Every way a run ends: 0; 1 with ONE error line; 130 on Ctrl-C; 70 and a
+    trace file on a bug -- never a traceback on the screen."""
+    try:
+        return run(argv)
+    except OtrError as e:
+        OUT.error(f"ERROR {e.code} [1]: {e.text}")
+        return 1
+    except KeyboardInterrupt:
+        OUT.error(f"{SCRIPT_NAME}: interrupted (Ctrl-C) while {_phase} -- what was done before stays, "
+                  f"a half-written file is removed; run it again to go on")
+        return 130
+    except OSError as e:
+        OUT.error(f"ERROR 00073 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        return 1
+    except Exception as e:   # a bug: one line here, the trace in a file
+        where = trace_file()
+        try:
+            where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
+        except OSError:
+            where = Path("(not written)")
+        OUT.error(f"ERROR 00074 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        return 70
+    finally:
+        if OUT.log is not None:
+            OUT.log.close()
+            OUT.log = None
+
+
+# --- --run-tests -----------------------------------------------------------
+# TAP: the plan first, then "ok K - name" / "not ok K - name" as each ends.
+# Nothing leaves the machine: the network is a fake server (_transport), the
+# downloader a stub script, the secrets fake.
+
+T_KEY = "K3y+S/ecr=t"           # quote() changes it: the raw AND the encoded form are looked for
+T_KEY_ENC = "K3y%2BS/ecr%3Dt"
+T_PASSW = "Pa55-w0rd&x"
+T_OTR_PASSW = "0tr-Secr3t"
+
+
+class T:
+    """One test: its folder, its fake server, what it found wrong."""
+
+    def __init__(self, folder: Path) -> None:
+        self.dir = folder
+        self.bad: List[str] = []
+        self.requests: List[Tuple[str, str, bytes]] = []
+        self.routes: Dict[str, Callable[[urllib.request.Request], Reply]] = {}
+
+    def check(self, ok: bool, what: str) -> None:
+        if not ok:
+            self.bad.append(what)
+
+    def serve(self, req: urllib.request.Request, timeout: float) -> Reply:
+        body = req.data if isinstance(req.data, bytes) else b""
+        self.requests.append((req.get_method(), req.full_url, body))
+        for prefix, answer in self.routes.items():
+            if req.full_url.startswith(prefix):
+                return answer(req)
+        raise urllib.error.URLError("no route in the test")
+
+    def config(self, extra: str = "") -> Path:
+        p = self.dir / "conf"
+        p.write_text(f'DATENKELLER_LOGIN="tester"\nDATENKELLER_PASSW="{T_PASSW}"\nDATENKELLER_APIKEY="{T_KEY}"\n'
+                     f'OTR_LOGIN="tester@x"\nOTR_PASSW="{T_OTR_PASSW}"\nLOG=""\n'
+                     f'COOKIE_FILE="{self.dir}/cookies"\nOTR_DL_CMD="{self.dir}/aria2c"\nOTR_DL_CMD_PARAMS="-c"\n'
+                     + extra, encoding="utf-8")
+        return p
+
+    def run(self, argv: Sequence[str], stdin: str = "") -> Tuple[int, str, str]:
+        """The tool in-process, as from a shell: rc, stdout, stderr."""
+        out, errs = io.StringIO(), io.StringIO()
+        old_in = sys.stdin
+        sys.stdin = io.StringIO(stdin)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errs):
+                rc = main(list(argv))
+        finally:
+            sys.stdin = old_in
+            OUT.__init__()
+        return rc, out.getvalue(), errs.getvalue()
+
+    def no_secret(self, text: str, where: str) -> None:
+        for secret in (T_KEY, T_KEY_ENC, T_PASSW, urllib.parse.quote(T_PASSW), T_OTR_PASSW):
+            self.check(secret not in text, f"a secret ({secret[:4]}...) in {where}")
+
+
+def _t_stub_aria2c(t: T) -> None:
+    """aria2c as the tests see it: records its argv and stdin, writes the out= file."""
+    (t.dir / "aria2c").write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > '{t.dir}/aria2c.argv'\n"
+        f"cat > '{t.dir}/aria2c.stdin'\n"
+        f"n=$(sed -n 's/^ *out=//p' '{t.dir}/aria2c.stdin')\n"
+        "echo data > \"$n\"; rm -f \"$n.aria2\"\n", encoding="utf-8")
+    (t.dir / "aria2c").chmod(0o755)
+
+
+SEARCH_ANSWER = """\
+A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.LQ.otr2;400;0
+A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2;900;0
+A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HD.otr2;2000;0
+A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.mpg.AddOn.otr2;50;0
+B__Folge_2_26.10.06_22-15_zdfneo_45_TVOON_DE.LQ.otr2;300;0
+C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey;200;0
+C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.HD.ac3.otrkey;20;0
+D__Folge_3_26.10.07_20-15_zdf_60_TVOON_DE.mpg.AddOn.otr2;50;0
+E_26.10.08_01-30_ard_120_TVOON_DE.HD.otr2;3000;0
+"""
+
+
+def _t_searched(t: T, *args: str, answer: str = SEARCH_ANSWER) -> Tuple[int, List[str], str]:
+    t.routes[DK_SITE] = lambda req: Reply(200, answer.encode())
+    rc, out, errs = t.run(["--config", str(t.config()), "search", "x", *args])
+    return rc, out.split(), errs
+
+
+def t_search_best_quality(t: T) -> None:
+    rc, names, errs = _t_searched(t)
+    t.check(rc == 0, f"rc {rc}: {errs}")
+    t.check(names == ["C_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey",
+                      "A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2",
+                      "B__Folge_2_26.10.06_22-15_zdfneo_45_TVOON_DE.LQ.otr2",
+                      "E_26.10.08_01-30_ard_120_TVOON_DE.HD.otr2"],
+            f"HQ over LQ and HD, oldest first, never an add-on or AC3, HD when alone: {names}")
+    rc, names, errs = _t_searched(t, answer=SEARCH_ANSWER + "F_26.10.09_10-15_zdf_10_TVOON_DE.UHD.otr2;1;0\n")
+    t.check(rc == 1 and "ERROR 00015" in errs and not names, f"a quality never seen stops the search: rc {rc} {errs}")
+    t.routes[DK_SITE] = lambda req: Reply(200, SEARCH_ANSWER.encode())
+    cap_hd = t.run(["--config", str(t.config('OTR_QUALITY_CAP="HD"\n')), "search", "x"])[1].split()
+    t.check("A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HD.otr2" in cap_hd, f"OTR_QUALITY_CAP=HD takes HD: {cap_hd}")
+
+
+def t_search_filters(t: T) -> None:
+    def first_letters(*args: str) -> List[str]:
+        rc, names, errs = _t_searched(t, *args)
+        t.check(rc == 0, f"{args}: rc {rc}: {errs}")
+        return [n.split("_")[0] for n in names]
+
+    for args, want, what in (
+            (["@zdfneo"], ["C", "B"], "ONE @channel filters (the sh version ignored a single one)"),
+            (["@zdf", "@ard"], ["A", "E"], "two channels: either"),
+            ([">2026-10-05"], ["B", "E"], ">DATE: that day on"),
+            (["<2026-10-04"], ["C", "A"], "<DATE alone: until that day"),
+            (["@2026-10-06"], ["B"], "@DATE: that day"),
+            (["@Sun"], ["A"], "@Sun: 2026-10-04 was one (the sh version's weekday was always Thu)"),
+            ([">22h", "<02h"], ["B", "E"], "a time range across midnight"),
+            (["@10:15"], ["A"], "@HH:MM"),
+            ([">100"], ["A", "E"], "a duration of three digits"),
+            (["<55"], ["C", "B"], "<DD"),
+            (["@zdf", "@Sun", "@10h15"], ["A"], "kinds together: all must match")):
+        got = first_letters(*args)
+        t.check(got == want, f"{what}: {args} -> {got}")
+    rc, _, errs = _t_searched(t, ",", "desc")
+    t.check(rc == 1 and "ERROR 00018" in errs, "a DESCRIPTION search is refused, not silently ignored")
+    rc, _, errs = _t_searched(t, "@2026-10-06", ">2026-10-01")
+    t.check(rc == 1 and "ERROR 00023" in errs, "@DATE with >DATE is refused")
+
+
+def t_search_fails_loud(t: T) -> None:
+    rc, names, errs = _t_searched(t, answer="<html>Wartungsarbeiten</html>\n")
+    t.check(rc == 1 and "ERROR 00025" in errs and not names, f"an answer that is no list fails: rc {rc}")
+    rc, names, errs = _t_searched(t, answer="")
+    t.check(rc == 1 and "ERROR 00058" in errs, "an empty answer fails")
+    t.routes[DK_SITE] = lambda req: Reply(503, b"down")
+    rc, out, errs = t.run(["--config", str(t.config()), "-V", "search", "x"])
+    t.check(rc == 1 and "ERROR 00030" in errs and "apikey=***" in errs, f"HTTP 503 fails, the key hidden: {errs}")
+    t.no_secret(out + errs, "a failed search's output")
+    t.routes.clear()
+    rc, out, errs = t.run(["--config", str(t.config()), "search", "x"])
+    t.check(rc == 1 and "ERROR 00029" in errs and "otr.datenkeller.net: no answer" in errs, f"no network: {errs}")
+    t.no_secret(out + errs, "a search without network")
+
+
+def t_search_key_off_output(t: T) -> None:
+    rc, _, errs = _t_searched(t)
+    t.check(rc == 0, errs)
+    method, url, _ = t.requests[-1]
+    t.check(method == "GET" and f"account=tester&apikey={T_KEY_ENC}&suche=x&details&limit=-1" in url, f"the query: {url}")
+    rc, out, errs = t.run(["--config", str(t.config()), "-D", "search", "x"])
+    t.no_secret(out + errs, "a -D search's output")
+    t.check("apikey=***" in errs, "-V shows the request, the key as ***")
+
+
+def t_get_name_forms(t: T) -> None:
+    n = "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2"
+    for line in (n, f"  {n}  ", f"https://otr.datenkeller.net/?getFile={n}", f"/?getFile={n}",
+                 f"https://otr.datenkeller.net/queueForFile/{n}", f"https://dl.invalid/x/{n}?t=1"):
+        t.check(name_of_line(line) == n, f"the name in: {line}")
+    for line in ("https://example.invalid/movie.mkv", "Foo.otr2"):
+        try:
+            name_of_line(line)
+            t.check(False, f"no OTR name, refused: {line}")
+        except OtrError as e:
+            t.check(e.code == "00032", e.text)
+
+
+def _t_get(t: T, names: str, *opts: str) -> Tuple[int, str, str]:
+    _t_stub_aria2c(t)
+    t.routes[f"{DK_SITE}/?jdlAPI"] = lambda req: Reply(200, (
+        "OK: https://dl.invalid/f/" + req.full_url.rsplit("getLinkFor=", 1)[1] + "?token=Tok\n").encode())
+    t.routes[DK_SITE] = lambda req: Reply(200, b"")
+    return t.run(["--config", str(t.config()), *opts, "get", "--no-decode"], stdin=names)
+
+
+def t_get_downloads_off_argv(t: T) -> None:
+    n = "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2"
+    rc, out, errs = _t_get(t, n + "\n")
+    t.check(rc == 0 and "1 downloaded" in errs, f"rc {rc}: {errs}")
+    t.check((t.dir / n).is_file(), "the file is there")
+    argv = (t.dir / "aria2c.argv").read_text()
+    stdin = (t.dir / "aria2c.stdin").read_text()
+    t.check("Tok" not in argv and argv.split() == ["-c", "--input-file=-"], f"aria2c's argv: no URL: {argv}")
+    t.check(f"/f/{n}?token=Tok" in stdin and f"out={n}" in stdin, f"URL and name on its stdin: {stdin}")
+    t.no_secret(out + errs + argv, "get's output and aria2c's argv")
+    login = [b for _, u, b in t.requests if u.endswith("/index.php")]
+    t.check(len(login) == 1 and urllib.parse.quote(T_PASSW).encode() in login[0], "the password: in the POST body")
+    t.check(all(T_KEY_ENC not in u for _, u, _ in t.requests if "jdlAPI" not in u), "the key: in API URLs only")
+
+
+def t_get_duplicates(t: T) -> None:
+    base = "Foo_26.10.04_10-15_zdf_100_TVOON_DE"
+    (t.dir / f"{base}.LQ.otr2").write_text("x")
+    _, _, errs = _t_get(t, f"{base}.HQ.otr2\n")
+    t.check("1 downloaded" in errs, f"an LQ here does not hold back an HQ: {errs}")
+    (t.dir / f"{base}.HQ.otr2").unlink()
+    (t.dir / f"{base}.HQ.mp4").write_text("x")
+    _, _, errs = _t_get(t, f"{base}.HD.otr2\n{base}.LQ.otr2\n")
+    t.check("2 skipped" in errs and "0 downloaded" in errs, f"an HQ here: HD (capped) and LQ are skipped: {errs}")
+    _, _, errs = _t_get(t, f"{base}.HD.otr2\n", "-F")
+    t.check("1 downloaded" in errs, f"-F fetches anyway: {errs}")
+    for p in t.dir.glob("Foo*"):
+        p.unlink()
+    (t.dir / "foo vom 4.10. - foo [2026-10-04] [10h15] [zdf] [dur=100] [TVOON] [HQ].avi").write_text("x")
+    _, _, errs = _t_get(t, f"{base}.HQ.otr2\n")
+    t.check("1 skipped" in errs, f"a renamed copy (the bracket form) counts: {errs}")
+    for p in t.dir.glob("foo*"):
+        p.unlink()
+    (t.dir / f"{base}.mpg.AddOn.zip").write_text("x")
+    (t.dir / f"{base}.HQ.otr2").write_text("x")
+    (t.dir / f"{base}.HQ.otr2.aria2").write_text("x")
+    _, _, errs = _t_get(t, f"{base}.HQ.otr2\n")
+    t.check("1 downloaded" in errs, f"an add-on is no copy; an unfinished one (.aria2 beside it) is resumed: {errs}")
+    rc, _, errs = _t_get(t, f"{base}.LQ.otr2\nnonsense\n")
+    t.check(rc == 1 and "ERROR 00032" in errs and "downloaded" not in errs, "a bad line stops get before any download")
+
+
+def _t_otr2_file(t: T, name: str, plain: bytes, cek: bytes, size: Optional[int] = None) -> Path:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    nonce = os.urandom(12)
+    head = json.dumps({"scheme": OTR2_SCHEME, "rec": "rec-1", "iv": nonce.hex(),
+                       "size": len(plain) if size is None else size, "content_type": "video/mp4"}).encode()
+    pre = OTR2_MAGIC + (1).to_bytes(2, "little") + b"\0\0" + len(head).to_bytes(4, "little") + b"\0" * 4
+    pad = b"\0" * ((-(len(pre) + len(head))) % OTR2_ALIGN)
+    enc = Cipher(algorithms.AES(cek), modes.CTR(nonce + b"\0\0\0\0")).encryptor()
+    p = t.dir / name
+    p.write_bytes(pre + head + pad + enc.update(plain) + enc.finalize())
+    return p
+
+
+def _t_key_server(t: T, cek: bytes, sha: str) -> None:
+    """OTR's three hosts, faked: the key wrapped to the client's public key."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    def key(req: urllib.request.Request) -> Reply:
+        body = cast(Dict[str, str], json.loads(req.data if isinstance(req.data, bytes) else b"{}"))
+        client = serialization.load_der_public_key(base64.b64decode(body["client_pub"]))
+        assert isinstance(client, ec.EllipticCurvePublicKey)
+        eph = ec.generate_private_key(ec.SECP256R1())
+        kek = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=ECIES_INFO.encode()).derive(
+            eph.exchange(ec.ECDH(), client))
+        nonce = os.urandom(12)
+        wrapped = eph.public_key().public_bytes(serialization.Encoding.X962,
+                                                serialization.PublicFormat.UncompressedPoint)
+        wrapped += nonce + AESGCM(kek).encrypt(nonce, cek, None)
+        return Reply(200, json.dumps({"wrapped_cek": base64.b64encode(wrapped).decode(),
+                                      "plaintext_sha256": sha}).encode())
+
+    t.routes[f"{OTR_API}/api/auth/login"] = lambda req: Reply(200, b'{"token": "jwt", "user": {"id": 7}}')
+    t.routes[f"{OTR_API}/api/otr2/ticket"] = lambda req: Reply(200, b'{"ticket": "tk", "exp": 9999999999}')
+    t.routes[f"{OTR_KEYS}/key"] = key
+
+
+def t_decode_otr2(t: T) -> None:
+    plain, cek = os.urandom(70000) + b"tail", os.urandom(32)
+    src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", plain, cek)
+    _t_key_server(t, cek, hashlib.sha256(plain).hexdigest().upper())
+    rc, out, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
+    got = t.dir / "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.mp4"
+    t.check(rc == 0, f"rc {rc}: {errs}")
+    t.check(got.is_file() and got.read_bytes() == plain, "decoded byte for byte, named OTR's name + .mp4 (#16)")
+    t.check(not src.exists(), "the source is removed once it checked out")
+    t.check("= OTR's" in errs, f"the check is said: {errs}")
+    t.no_secret(out + errs, "decode's output")
+    login = [b for _, u, b in t.requests if u.endswith("/api/auth/login")]
+    t.check(len(login) == 1 and T_OTR_PASSW.encode() in login[0], "the OTR password: in the login body only")
+    t.check(all(T_OTR_PASSW not in u for _, u, _ in t.requests), "the OTR password is in no URL")
+
+
+def t_decode_otr2_wrong_checksum(t: T) -> None:
+    plain, cek = b"x" * 1000, os.urandom(32)
+    src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", plain, cek)
+    _t_key_server(t, cek, hashlib.sha256(b"something else").hexdigest())
+    rc, _, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
+    t.check(rc == 1 and "ERROR 00055" in errs, f"a checksum mismatch fails: rc {rc}: {errs}")
+    t.check(src.exists(), "the source is kept")
+    t.check(sorted(p.name for p in t.dir.iterdir() if "Foo" in p.name) == [src.name], "no decoded file, no .part left")
+
+
+def t_decode_otr2_incomplete(t: T) -> None:
+    cek = os.urandom(32)
+    src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", b"x" * 100, cek, size=5000)
+    _t_key_server(t, cek, "")
+    rc, _, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
+    t.check(rc == 1 and "ERROR 00053" in errs, f"an incomplete .otr2 fails: {errs}")
+    t.check(not any(u.startswith(OTR_KEYS) for _, u, _ in t.requests), "... before a key is asked for (each one counts)")
+
+
+def t_decode_otrkey(t: T) -> None:
+    key = os.urandom(16)
+    head = b"FN=Foo_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey&OH=abc123&SZ=1"
+    head += b"\0" * (OTRKEY_HEADER - len(head))
+    plain = os.urandom(8 * 4000) + b"12345"                      # a tail under 8 bytes stays plain
+    src = t.dir / "Foo_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4.otrkey"
+    src.write_bytes(OTRKEY_MAGIC + OtrBlowfish(OTRKEY_HEADER_KEY).encrypt(head)
+                    + OtrBlowfish(key).encrypt(plain[:-5]) + plain[-5:])
+    t.routes[OTR_QUELLE] = lambda req: Reply(200, json.dumps({"random_key": key.hex()}).encode())
+    rc, out, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
+    got = t.dir / "Foo_23.10.30_19-20_zdfneo_55_TVOON_DE.mpg.mp4"
+    t.check(rc == 0 and got.is_file() and got.read_bytes() == plain, f"decoded byte for byte: rc {rc}: {errs}")
+    sent = urllib.parse.parse_qs(t.requests[-1][2].decode())
+    t.check(sent.get("OH") == ["abc123"] and sent.get("FN") == [src.name], f"FN and OH from the header: {sent}")
+    t.no_secret(out + errs, "decode's output")
+    t.routes[OTR_QUELLE] = lambda req: Reply(200, b'{"error": "denied", "message": "no decodes left"}')
+    src.write_bytes(OTRKEY_MAGIC + OtrBlowfish(OTRKEY_HEADER_KEY).encrypt(head) + b"x" * 64)
+    rc, _, errs = t.run(["--config", str(t.config()), "-F", "decode", str(src), str(t.dir)])
+    t.check(rc == 1 and "no decodes left" in errs and src.exists(), f"a refusal says OTR's reason: {errs}")
+    # the variant pinned: the standard Blowfish (Schneier's vector), on byte-swapped words
+    from cryptography.hazmat.decrepit.ciphers.algorithms import Blowfish
+    from cryptography.hazmat.primitives.ciphers import Cipher, modes
+    std = Cipher(Blowfish(bytes(8)), modes.ECB()).encryptor().update(bytes(8))
+    t.check(std.hex() == "4ef997456198dd78", f"cryptography's Blowfish is the standard one: {std.hex()}")
+    t.check(OtrBlowfish(bytes(8)).encrypt(bytes(8)) == _swap32(std), "OTR's: the words swapped around it")
+
+
+def t_get_decodes_what_is_kept(t: T) -> None:
+    plain, cek = b"movie" * 100, os.urandom(32)
+    kept = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", plain, cek)
+    going = _t_otr2_file(t, "Bar_26.10.05_10-15_zdf_100_TVOON_DE.HQ.otr2", plain, cek)
+    (t.dir / (going.name + ".aria2")).write_text("x")
+    addon = t.dir / "Foo_26.10.04_10-15_zdf_100_TVOON_DE.mpg.AddOn.otr2"
+    addon.write_text("zip")
+    _t_key_server(t, cek, hashlib.sha256(plain).hexdigest())
+    rc, _, errs = t.run(["--config", str(t.config()), "get", "--no-decode"])
+    t.check(rc == 0 and kept.exists() and "none decoded" in errs, f"--no-decode decodes nothing: {errs}")
+    rc, _, errs = t.run(["--config", str(t.config()), "get"])
+    t.check(rc == 0 and "1 decoded" in errs and not kept.exists(), f"get decodes the kept .otr2 (#17): {errs}")
+    t.check(going.exists() and addon.exists(), "never one aria2c is still writing, never an add-on")
+
+
+def t_config_read_never_run(t: T) -> None:
+    def load(text: str) -> Tuple[Optional[Settings], str]:
+        p = t.dir / "c.conf"
+        p.write_text(text, encoding="utf-8")
+        errs = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(errs):
+                return load_settings(str(p)), errs.getvalue()
+        except OtrError as e:
+            return None, e.code
+        finally:
+            OUT.__init__()
+
+    s, _ = load('A="/x"\nLOGFILE=~/"l og"  # comment\nCOOKIE_FILE="${A}/c-$HOME"\nOTR_DL_CMD=\'$A\'\n')
+    t.check(s is not None and s.logfile == f"{Path.home()}/l og" and s.cookie_file == f"/x/c-{os.environ['HOME']}"
+            and s.dl_cmd == "$A", f"quotes, ~, $NAME, ${{NAME}}: {s}")
+    ran = t.dir / "ran"
+    t.check(load(f'LOGFILE="$(touch {ran})"\n')[1] == "00003" and not ran.exists(),
+            "a command substitution is refused -- and never run")
+    t.check(load("f() {\n  echo x\n}\n")[1] == "00008", "a function is refused")
+    t.check(load("[ -s x ] && . x\n")[1] == "00008", "a line that sources a file is refused")
+    t.check(load('LOGFILE="$NOPE_UNSET_X"\n')[1] == "00004", "an unset $NAME is refused")
+    t.check(load("LOGFILE=a b\n")[1] == "00007", "two words unquoted are refused")
+    t.check(load('LOG="yes"\n')[1] == "00009", "a flag is 1 or empty")
+    s, errs = load('GAWK_CMD="gawk"\n')
+    t.check(s is not None and "GAWK_CMD is not a my-otr setting" in errs, f"an unknown key is said: {errs}")
+    (t.dir / "c.conf.GLOBAL").write_text('OTR_LOGIN="g"\nOTR_PASSW="gp"\n', encoding="utf-8")
+    s, _ = load('OTR_PASSW="local"\n')
+    t.check(s is not None and s.otr_login == "g" and s.otr_passw == "local", "<FILE>.GLOBAL first, <FILE> on top")
+
+
+def t_create_config(t: T) -> None:
+    rc, out, _ = t.run(["--create-config"])
+    t.check(rc == 0 and out == DEFAULT_CONFIG, "--create-config prints the defaults")
+    p = t.dir / "new.conf"
+    rc, _, errs = t.run(["--create-config", str(p)])
+    t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
+    rc, _, errs = t.run([f"--create-config={p}"])
+    t.check(rc == 1 and "ERROR 00070" in errs, "never over an existing file")
+    rc, _, errs = t.run(["--config", str(p), "search", "x"])
+    t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
+            f"the defaults parse cleanly, and an empty credential is named: {errs}")
+    offer = config_offer()
+    t.check(offer != [] and all(Path(o) in config_search_paths() for o in offer),
+            f"the offer names only places that are read: {offer}")
+
+
+def t_output_layers(t: T) -> None:
+    t.routes[DK_SITE] = lambda req: Reply(200, SEARCH_ANSWER.encode())
+    log = t.dir / "log"
+    plain = t.run(["--config", str(t.config()), "search", "x"])
+    quiet = t.run(["--config", str(t.config()), "search", "x", "-Q", "--log-file", str(log)])
+    verbose = t.run(["--config", str(t.config()), "-V", "search", "x"])
+    t.check(plain[1] == quiet[1] == verbose[1] != "", "stdout: the same results in every layer")
+    t.check(plain[2] != "" and quiet[2] == "", f"-Q: nothing on the terminal: {quiet[2]!r}")
+    t.check(all(line in verbose[2] for line in plain[2].splitlines()) and len(verbose[2]) > len(plain[2]),
+            "-V adds to the default, never replaces it")
+    t.check("searching otr.datenkeller.net" in log.read_text(), "-Q spares the terminal, not the log")
+    for argv, want in ((["--nope"], "no such option '--nope'"),
+                       (["--update-check"], "you mean `my-otr update-check`"),
+                       (["x.otrkey"], "you mean `my-otr decode x.otrkey`"),
+                       (["dl", "--no-decode"], "--no-decode goes with 'get'")):
+        rc, _, errs = t.run(argv)
+        t.check(rc == 1 and want in errs, f"{argv}: {errs}")
+    rc, out, _ = t.run(["--search", "x", "--config", str(t.config()), "-Q"])
+    t.check(rc == 0 and out.split() == plain[1].split(), "the old spelling --search, options after the command")
+
+
+def t_ctrl_c(t: T) -> None:
+    """A REAL SIGINT while get waits on stdin: rc 130, one line, no traceback."""
+    p = subprocess.Popen([sys.executable, os.path.realpath(__file__), "--config", str(t.config()), "get"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(2)
+    p.send_signal(signal.SIGINT)
+    out, errs = p.communicate(timeout=30)
+    t.check(p.returncode == 130, f"rc {p.returncode}")
+    t.check("interrupted (Ctrl-C) while reading the names on stdin" in errs and "Traceback" not in errs, errs)
+    t.check(len(errs.strip().splitlines()) == 1 and out == "", f"one line: {errs!r}")
+
+
+def t_bug_trace(t: T) -> None:
+    def boom(req: urllib.request.Request) -> Reply:
+        raise ZeroDivisionError("a bug")
+
+    t.routes[DK_SITE] = boom
+    rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
+    m = re.search(r"the trace: (\S+)", errs)
+    t.check(rc == 70 and "ERROR 00074 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
+    if m:
+        Path(m.group(1)).unlink()
+
+
+def t_update_check(t: T) -> None:
+    z = t.dir / "otr.zip"
+    ours = "\n".join(PROTOCOL.values()) + "\n__version__ = '2026-11-01.1'\n"
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("otr_cli_decoder.py", ours)
+    rc, out, _ = t.run(["update-check", str(z)])
+    t.check(rc == 0 and "2026-11-01.1" in out and "otr_cli_decoder.py: changed" in out
+            and "otr2lib.py: GONE" in out and "CHANGED" not in out, f"files compared, every constant found: {out}")
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("otr_cli_decoder.py", ours.replace(ECIES_INFO, "otr2-key-wrapping-v2"))
+    rc, out, _ = t.run(["update-check", str(z)])
+    t.check("HKDF info: CHANGED" in out, f"a changed constant is named: {out}")
+
+
+def t_version(t: T) -> None:
+    rc, out, _ = t.run(["--version"])
+    build = hashlib.sha256(Path(os.path.realpath(__file__)).read_bytes()).hexdigest()[:12]
+    t.check(rc == 0 and out.startswith(f"{SCRIPT_NAME} {SCRIPT_VERSION} (") and f"build {build})" in out, out)
+
+
+TESTS: Final[List[Callable[[T], None]]] = [
+    t_search_best_quality, t_search_filters, t_search_fails_loud, t_search_key_off_output,
+    t_get_name_forms, t_get_downloads_off_argv, t_get_duplicates, t_decode_otr2, t_decode_otr2_wrong_checksum,
+    t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
+    t_create_config, t_output_layers, t_ctrl_c, t_bug_trace, t_update_check, t_version,
+]
+
+
+def run_tests(name_filter: str) -> int:
+    defined = {n for n in globals() if re.fullmatch(r"t_[a-z0-9_]+", n)}
+    listed = {f.__name__ for f in TESTS}
+    if defined != listed:
+        print(f"Bail out! test functions and TESTS differ: {sorted(defined ^ listed)}")
+        return 1
+    chosen = [f for f in TESTS if name_filter in f.__name__]
+    print(f"1..{len(chosen)}", flush=True)
+    global _transport
+    bad, home = 0, Path.cwd()
+    for k, test in enumerate(chosen, 1):
+        with tempfile.TemporaryDirectory(prefix="my-otr-tests.") as d:
+            t = T(Path(d).resolve())
+            os.chdir(t.dir)
+            _transport = t.serve
+            try:
+                test(t)
+            except Exception as e:   # a test that crashes fails, and the next one runs
+                t.bad.append(f"crashed: {type(e).__name__}: {e}")
+                t.bad.extend(traceback.format_exc().splitlines())
+            finally:
+                _transport = _urllib_transport
+                os.chdir(home)
+                OUT.__init__()
+        print(f"{'not ok' if t.bad else 'ok'} {k} - {test.__name__}", flush=True)
+        for b in t.bad:
+            print(f"#   {b}")
+        bad += bool(t.bad)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    bootstrap()
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    sys.exit(main(sys.argv[1:]))
