@@ -59,32 +59,80 @@ VENV_DIR: Final = Path.home() / ".python.venv" / SCRIPT_NAME
 VENV_DEPS: Final = ("cryptography>=43",)
 
 
+class _Terminated(Exception):
+    """SIGTERM during the setup -- a caller's time limit, say."""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def bootstrap() -> None:
     """Run inside ~/.python.venv/my-otr: create it on first use, then re-exec there."""
     if Path(sys.prefix).resolve() == VENV_DIR.resolve():
         return
     py = VENV_DIR / "bin" / "python3"
     if not py.is_file():
-        print(f" >>> {SCRIPT_NAME}: setting up its Python environment {VENV_DIR} (once): {', '.join(VENV_DEPS)}",
-              file=sys.stderr)
-        # Built beside it and renamed into place: an interrupted setup leaves
-        # no half venv for the next run to trust.
-        new = VENV_DIR.with_name(f".{SCRIPT_NAME}.new.{os.getpid()}")
-        try:
-            subprocess.run([sys.executable, "-m", "venv", str(new)], check=True)
-            subprocess.run([str(new / "bin" / "python3"), "-m", "pip", "install", "--quiet",
-                            "--disable-pip-version-check", *VENV_DEPS], check=True)
-            new.rename(VENV_DIR)
-        except (OSError, subprocess.CalledProcessError) as e:
-            shutil.rmtree(new, ignore_errors=True)
-            print(f"ERROR 00001 [1]: cannot set up {VENV_DIR}: {e}", file=sys.stderr)
-            sys.exit(1)
-        except KeyboardInterrupt:
-            shutil.rmtree(new, ignore_errors=True)
-            print(f"{SCRIPT_NAME}: interrupted (Ctrl-C) while setting up {VENV_DIR} -- nothing is left of it",
-                  file=sys.stderr)
-            sys.exit(130)
+        build_venv()
     os.execv(str(py), [str(py), os.path.realpath(__file__), *sys.argv[1:]])
+
+
+def build_venv() -> None:
+    """~/.python.venv/my-otr, complete or not at all: built beside it and renamed
+    in, so a setup stopped half-way (Ctrl-C, a caller's SIGTERM) removes its half,
+    and the half of one killed outright is removed by the next. It runs in $HOME,
+    never in the caller's folder -- that may be a volume this process may not read."""
+    parent = VENV_DIR.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    for old in parent.glob(f".{SCRIPT_NAME}.new.*"):
+        pid = old.name.rsplit(".", 1)[-1]
+        if pid.isdigit() and not _alive(int(pid)):
+            shutil.rmtree(old, ignore_errors=True)
+    if VENV_DIR.exists() or VENV_DIR.is_symlink():
+        # its python3 is gone: the Python it was made from was upgraded away
+        print(f" >>> {SCRIPT_NAME}: {VENV_DIR} has no python3 that runs -- built again", file=sys.stderr)
+        shutil.rmtree(VENV_DIR, ignore_errors=True)
+    print(f" >>> {SCRIPT_NAME}: setting up its Python environment {VENV_DIR} (once): {', '.join(VENV_DEPS)}",
+          file=sys.stderr)
+    started = time.monotonic()
+    new = parent / f".{SCRIPT_NAME}.new.{os.getpid()}"
+
+    def on_term(signum: int, frame: object) -> None:
+        raise _Terminated()
+
+    signal.signal(signal.SIGTERM, on_term)
+    home = str(Path.home())
+    try:
+        subprocess.run([sys.executable, "-m", "venv", str(new)], check=True, cwd=home)
+        subprocess.run([str(new / "bin" / "python3"), "-m", "pip", "install", "--quiet",
+                        "--disable-pip-version-check", *VENV_DEPS], check=True, cwd=home)
+        try:
+            new.rename(VENV_DIR)
+        except OSError:
+            if not (VENV_DIR / "bin" / "python3").is_file():
+                raise
+            shutil.rmtree(new, ignore_errors=True)   # another run set it up first
+    except (OSError, subprocess.CalledProcessError) as e:
+        shutil.rmtree(new, ignore_errors=True)
+        print(f"ERROR 00001 [1]: cannot set up {VENV_DIR}: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (KeyboardInterrupt, _Terminated) as e:
+        shutil.rmtree(new, ignore_errors=True)
+        how, rc = ("Ctrl-C", 130) if isinstance(e, KeyboardInterrupt) else ("SIGTERM", 143)
+        print(f"{SCRIPT_NAME}: stopped ({how}) while setting up {VENV_DIR} after "
+              f"{time.monotonic() - started:.0f}s -- nothing is left of it; the next run starts over",
+              file=sys.stderr)
+        sys.exit(rc)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    print(f" >>> {SCRIPT_NAME}: its Python environment is ready [{time.monotonic() - started:.0f}s]",
+          file=sys.stderr)
 
 
 # --- 2. output, errors -----------------------------------------------------
@@ -1298,7 +1346,6 @@ OPTIONS
   --version                the exact build
   -h, --help               this
 
-  The old spellings --search --get --dl --download --decode --login still work.
 
 CONFIG  KEY="value" lines, read and never run -- the first found of
   $MY_OTR_CONFIG, --config <FILE>,
@@ -1311,8 +1358,6 @@ EXAMPLES
 
 COMMANDS: Final = {"search": "search", "get": "get", "dl": "dl", "download": "dl", "decode": "decode",
                    "login": "login", "update-check": "update-check", "help": "help"}
-# the spellings my-otr-refresh and my-dl-helper call the sh version by
-LEGACY: Final = {"--search", "--get", "--dl", "--download", "--decode", "--login"}
 
 
 @dataclass
@@ -1347,10 +1392,6 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         key, eq, val = a.partition("=")
         if a == "--":
             rest = True
-        elif a in LEGACY:
-            if c.command is not None:
-                err("00065", f"one command only -- '{c.command}' and '{a}'")
-            c.command = COMMANDS[a[2:]]
         elif a in ("-Q", "--quiet"):
             c.quiet = True
         elif a in ("-V", "--verbose"):
@@ -1366,7 +1407,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif key in ("--log-file", "--config"):
             v = val if eq else next(it, None)
             if not v:
-                err("00066", f"{key} needs a <FILE>")
+                err("00065", f"{key} needs a <FILE>")
             if key == "--config":
                 c.config = v
             else:
@@ -1378,9 +1419,9 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         else:
             verb = a.lstrip("-")
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
-            err("00067", f"no such option '{a}'{hint}")
+            err("00066", f"no such option '{a}'{hint}")
     if c.no_decode and c.command != "get":
-        err("00068", "--no-decode goes with 'get'")
+        err("00067", "--no-decode goes with 'get'")
     return c
 
 
@@ -1394,7 +1435,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00069", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00068", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -1407,7 +1448,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00070", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00069", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -1427,7 +1468,7 @@ def run(argv: Sequence[str]) -> int:
         return 0
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00071", "update-check needs the <ZIP> of OTR's decoder")
+            err("00070", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -1437,7 +1478,7 @@ def run(argv: Sequence[str]) -> int:
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00072", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00071", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
@@ -1464,7 +1505,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00073 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00072 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -1472,7 +1513,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00074 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00073 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -1851,7 +1892,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00070" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00069" in errs, "never over an existing file")
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
             f"the defaults parse cleanly, and an empty credential is named: {errs}")
@@ -1877,8 +1918,10 @@ def t_output_layers(t: T) -> None:
                        (["dl", "--no-decode"], "--no-decode goes with 'get'")):
         rc, _, errs = t.run(argv)
         t.check(rc == 1 and want in errs, f"{argv}: {errs}")
-    rc, out, _ = t.run(["--search", "x", "--config", str(t.config()), "-Q"])
-    t.check(rc == 0 and out.split() == plain[1].split(), "the old spelling --search, options after the command")
+    rc, out, errs = t.run(["--dl"])
+    t.check(rc == 1 and "you mean `my-otr dl`" in errs, f"the old spelling --dl is answered, not run: {errs}")
+    rc, out, _ = t.run(["search", "x", "--config", str(t.config()), "-Q"])
+    t.check(rc == 0 and out.split() == plain[1].split(), "options after the command")
 
 
 def t_ctrl_c(t: T) -> None:
@@ -1893,6 +1936,33 @@ def t_ctrl_c(t: T) -> None:
     t.check(len(errs.strip().splitlines()) == 1 and out == "", f"one line: {errs!r}")
 
 
+def t_bootstrap(t: T) -> None:
+    """The venv setup, offline (pip finds nothing): it leaves a complete venv or
+    none -- never a half one, never the leftovers of a run before it."""
+    venvs = t.dir / ".python.venv"
+    venvs.mkdir()
+    (venvs / ".my-otr.new.999999").mkdir()                      # left by a run killed outright
+    (venvs / "my-otr" / "bin").mkdir(parents=True)
+    (venvs / "my-otr" / "bin" / "python3").symlink_to("/nonexistent/python3.13")   # upgraded away
+    env = {**os.environ, "HOME": str(t.dir), "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(t.dir / "none")}
+    me = os.path.realpath(__file__)
+    p = subprocess.run([sys.executable, me, "--version"], env=env, capture_output=True, text=True, timeout=120)
+    t.check(p.returncode == 1 and "ERROR 00001 [1]: cannot set up" in p.stderr, f"pip fails: rc {p.returncode}: {p.stderr}")
+    t.check("has no python3 that runs -- built again" in p.stderr, f"the broken venv is said: {p.stderr}")
+    t.check(sorted(x.name for x in venvs.iterdir()) == [], f"nothing left: {sorted(x.name for x in venvs.iterdir())}")
+    # a caller's time limit: SIGTERM in the middle of the setup
+    q = subprocess.Popen([sys.executable, me, "--version"], env=env, cwd="/", stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not any(venvs.glob(".my-otr.new.*")):
+        time.sleep(0.05)
+    q.send_signal(signal.SIGTERM)
+    _, errs = q.communicate(timeout=60)
+    t.check(q.returncode == 143 and "stopped (SIGTERM) while setting up" in errs and "Traceback" not in errs,
+            f"SIGTERM: rc {q.returncode}: {errs}")
+    t.check(sorted(x.name for x in venvs.iterdir()) == [], f"no half venv after SIGTERM: {sorted(x.name for x in venvs.iterdir())}")
+
+
 def t_bug_trace(t: T) -> None:
     def boom(req: urllib.request.Request) -> Reply:
         raise ZeroDivisionError("a bug")
@@ -1900,7 +1970,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00074 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00073 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()
@@ -1930,7 +2000,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_search_best_quality, t_search_filters, t_search_fails_loud, t_search_key_off_output,
     t_get_name_forms, t_get_downloads_off_argv, t_get_duplicates, t_decode_otr2, t_decode_otr2_wrong_checksum,
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
-    t_create_config, t_output_layers, t_ctrl_c, t_bug_trace, t_update_check, t_version,
+    t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_bug_trace, t_update_check, t_version,
 ]
 
 

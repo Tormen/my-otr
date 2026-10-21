@@ -81,11 +81,10 @@ Usage
       --log-file <FILE>        record into FILE (implies -l)
       --config <FILE>          read FILE instead of searching for one
       --create-config [<FILE>] the default config, to stdout or into a new FILE
-      --run-tests [<FILTER>]   the built-in tests (TAP); FILTER: part of a name
+      --run-tests [<FILTER>]   the built-in tests (TAP) -- all, or those whose name holds FILTER
       --version                the exact build
       -h, --help               this
 
-      The old spellings --search --get --dl --download --decode --login still work.
 
     CONFIG  KEY="value" lines, read and never run -- the first found of
       $MY_OTR_CONFIG, --config <FILE>,
