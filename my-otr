@@ -1946,12 +1946,12 @@ def t_bootstrap(t: T) -> None:
     (venvs / "my-otr" / "bin" / "python3").symlink_to("/nonexistent/python3.13")   # upgraded away
     env = {**os.environ, "HOME": str(t.dir), "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(t.dir / "none")}
     me = os.path.realpath(__file__)
-    p = subprocess.run([sys.executable, me, "--version"], env=env, capture_output=True, text=True, timeout=120)
+    p = subprocess.run([sys.executable, me, "--run-tests", "no-such-test"], env=env, capture_output=True, text=True, timeout=120)
     t.check(p.returncode == 1 and "ERROR 00001 [1]: cannot set up" in p.stderr, f"pip fails: rc {p.returncode}: {p.stderr}")
     t.check("has no python3 that runs -- built again" in p.stderr, f"the broken venv is said: {p.stderr}")
     t.check(sorted(x.name for x in venvs.iterdir()) == [], f"nothing left: {sorted(x.name for x in venvs.iterdir())}")
     # a caller's time limit: SIGTERM in the middle of the setup
-    q = subprocess.Popen([sys.executable, me, "--version"], env=env, cwd="/", stdout=subprocess.PIPE,
+    q = subprocess.Popen([sys.executable, me, "--run-tests", "no-such-test"], env=env, cwd="/", stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline and not any(venvs.glob(".my-otr.new.*")):
@@ -1961,6 +1961,23 @@ def t_bootstrap(t: T) -> None:
     t.check(q.returncode == 143 and "stopped (SIGTERM) while setting up" in errs and "Traceback" not in errs,
             f"SIGTERM: rc {q.returncode}: {errs}")
     t.check(sorted(x.name for x in venvs.iterdir()) == [], f"no half venv after SIGTERM: {sorted(x.name for x in venvs.iterdir())}")
+
+
+def t_venv_only_to_decode(t: T) -> None:
+    """--help must answer at once on a machine with no venv: my-rollout gives it
+    20s, and a pip install there kept a tested copy from being offered (ada)."""
+    for argv, want in ((["--help"], False), ([], False), (["--version"], False), (["--create-config"], False),
+                       (["search", "x", "@zdf"], False), (["dl"], False), (["get", "--no-decode"], False),
+                       (["update-check", "z.zip"], False), (["--nope"], False),
+                       (["get"], True), (["-Q", "get", "--log-file", "l"], True), (["decode", "f.otr2"], True),
+                       (["--decode", "f"], False), (["--run-tests"], True), (["--run-tests=boot"], True)):
+        t.check(needs_venv(argv) == want, f"needs_venv({argv}) should be {want}")
+    env = {**os.environ, "HOME": str(t.dir), "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(t.dir / "none")}
+    me = os.path.realpath(__file__)
+    for argv in (["--help"], ["--version"]):
+        p = subprocess.run([sys.executable, me, *argv], env=env, capture_output=True, text=True, timeout=20)
+        t.check(p.returncode == 0 and p.stdout != "" and "setting up" not in p.stderr, f"{argv} without a venv: {p.stderr}")
+    t.check(not (t.dir / ".python.venv").exists(), "no venv set up for --help or --version")
 
 
 def t_bug_trace(t: T) -> None:
@@ -2000,7 +2017,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_search_best_quality, t_search_filters, t_search_fails_loud, t_search_key_off_output,
     t_get_name_forms, t_get_downloads_off_argv, t_get_duplicates, t_decode_otr2, t_decode_otr2_wrong_checksum,
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
-    t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_bug_trace, t_update_check, t_version,
+    t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
 ]
 
 
@@ -2035,7 +2052,21 @@ def run_tests(name_filter: str) -> int:
     return 1 if bad else 0
 
 
+def needs_venv(argv: Sequence[str]) -> bool:
+    """Only decoding needs cryptography: the venv is set up for `decode`, `get`
+    (unless --no-decode) and the tests -- never for --help, a search or a
+    download, which then answer at once on a machine without it."""
+    if argv[:1] and argv[0].partition("=")[0] == "--run-tests":
+        return True
+    try:
+        c = parse_cli(argv)
+    except OtrError:
+        return False          # main says what is wrong with the arguments
+    return c.command == "decode" or (c.command == "get" and not c.no_decode)
+
+
 if __name__ == "__main__":
-    bootstrap()
+    if needs_venv(sys.argv[1:]):
+        bootstrap()
     signal.signal(signal.SIGINT, signal.default_int_handler)
     sys.exit(main(sys.argv[1:]))

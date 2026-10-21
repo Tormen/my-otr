@@ -23,8 +23,9 @@ Dependencies
 ------------
 
 - Python 3.9 or newer
-- [cryptography](https://pypi.org/project/cryptography/) -- my-otr installs it
-  itself on first use, into its own environment `~/.python.venv/my-otr`
+- [cryptography](https://pypi.org/project/cryptography/) -- for decoding only:
+  my-otr installs it itself the first time it decodes, into its own environment
+  `~/.python.venv/my-otr`
 - [aria2c](https://aria2.github.io/) for the downloads
 
 
