@@ -445,6 +445,7 @@ _OTR_NAME: Final = re.compile(
 _OTR_QUALITY: Final[Dict[str, Optional[Quality]]] = {
     "mpg.hq.avi": "HQ", "mpg.hd.avi": "HD", "mpg.avi": "DivX", "mpg.mp4": "MP4",  # .otrkey
     "hq": "HQ", "hd": "HD", "lq": "LQ",                                         # .otr2
+    "mpg.hq": "HQ", "mpg.hd": "HD", "mpg.lq": "LQ",                             # .otr2, named since 2026-08
     "mpg.addon": None, "mpg.hd.ac3": None,
 }
 _TAG_QUALITY: Final[Dict[str, Quality]] = {"hq": "HQ", "hd": "HD", "mp4": "MP4", "divx": "DivX", "lq": "LQ"}
@@ -462,7 +463,8 @@ class Recording:
     hhmm: Tuple[int, int]
     channel: str
     minutes: int
-    quality: Optional[Quality]
+    quality: Optional[Quality]      # None: not a recording to take -- an add-on, or `unknown`
+    unknown: str = ""               # the quality text, when it is one my-otr has not learned
 
     @property
     def slot(self) -> Slot:
@@ -479,22 +481,21 @@ class Recording:
 
 def parse_otr_name(name: str) -> Optional[Recording]:
     """An OTR file name as a Recording; None when it is not one. A quality OTR
-    has not used before stops the run: it must be learned, not guessed."""
+    has not used before is never guessed: the Recording has no quality and
+    names the text in `unknown`, and the callers skip it, saying so."""
     m = _OTR_NAME.match(name)
     if m is None:
         return None
     q = m.group("q").lower()
-    if q not in _OTR_QUALITY:
-        err("00015", f"'{name}': the quality '{m.group('q')}' is new -- my-otr does not know it yet")
     try:
         day = datetime.datetime.strptime(m.group("date"), "%y.%m.%d").date()
         hh, mm = (int(x) for x in m.group("time").split("-"))
         if hh > 23 or mm > 59:
             raise ValueError(m.group("time"))
     except ValueError:
-        err("00016", f"'{name}': no valid date and time in it")
+        err("00015", f"'{name}': no valid date and time in it")
     return Recording(name, m.group("title"), day, (hh, mm), m.group("channel"),
-                     int(m.group("minutes")), _OTR_QUALITY[q])
+                     int(m.group("minutes")), _OTR_QUALITY.get(q), "" if q in _OTR_QUALITY else m.group("q"))
 
 
 def capped_rank(q: Quality, cap: QualityCap) -> int:
@@ -511,9 +512,10 @@ def local_quality(name: str) -> Optional[Quality]:
     for suffix in (".otrkey", ".otr2"):
         if rest.endswith(suffix):
             return _OTR_QUALITY.get(rest[:-len(suffix)])
-    if rest in _OTR_QUALITY:                       # a decoded .otrkey: "mpg.hq.avi"
-        return _OTR_QUALITY[rest]
-    return _OTR_QUALITY.get(rest.split(".")[0])    # a decoded .otr2: "hq.mp4"
+    for form in (rest, rest.rsplit(".", 1)[0]):    # a decoded .otrkey: "mpg.hq.avi"; .otr2: "hq.mp4", "mpg.hq.mp4"
+        if form in _OTR_QUALITY:
+            return _OTR_QUALITY[form]
+    return None
 
 
 def unfinished(p: Path) -> bool:
@@ -595,7 +597,7 @@ def _hhmm(text: str, range_end: bool) -> Tuple[int, int]:
     or :59 as the end of a range."""
     m = re.fullmatch(r"(\d\d)(?:[:h-](\d\d)?)?", text)
     if m is None or int(m.group(1)) > 23 or (m.group(2) and int(m.group(2)) > 59):
-        err("00017", f"'{text}' is not a time -- HH, HHh, HH:MM")
+        err("00016", f"'{text}' is not a time -- HH, HHh, HH:MM")
     minute = int(m.group(2)) if m.group(2) else (59 if range_end else 0)
     return int(m.group(1)), minute
 
@@ -605,21 +607,21 @@ def parse_filters(args: Sequence[str]) -> Filters:
     day_at: Optional[datetime.date] = None
     for a in args:
         if a == ",":
-            err("00018", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's API answers no description")
+            err("00017", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's API answers no description")
         if re.fullmatch(r"[@<>]\d{4}-\d\d-\d\d", a):
             try:
                 day = datetime.date.fromisoformat(a[1:])
             except ValueError:
-                err("00019", f"'{a}': no such date")
+                err("00018", f"'{a}': no such date")
             if a[0] == "@":
                 day_at = day
             elif a[0] == ">":
                 if f.day_from:
-                    err("00020", f"'{a}': one >DATE only")
+                    err("00019", f"'{a}': one >DATE only")
                 f.day_from = day
             else:
                 if f.day_till:
-                    err("00021", f"'{a}': one <DATE only")
+                    err("00020", f"'{a}': one <DATE only")
                 f.day_till = day
         elif re.fullmatch(r"[@<>]\d\d(?:[:h-]\d\d|[:h])", a):
             if a[0] == "@":
@@ -641,15 +643,15 @@ def parse_filters(args: Sequence[str]) -> Filters:
         elif a.startswith("@") and len(a) > 1:
             f.channels.append(a[1:].lower())
         elif a[:1] in ("<", ">"):
-            err("00022", f"'{a}' is no filter ({SCRIPT_NAME} --help lists them)")
+            err("00021", f"'{a}' is no filter ({SCRIPT_NAME} --help lists them)")
         else:
             f.title.append(a)
     if day_at:
         if f.day_from or f.day_till:
-            err("00023", "@DATE together with <DATE or >DATE -- one or the other")
+            err("00022", "@DATE together with <DATE or >DATE -- one or the other")
         f.day_from = f.day_till = day_at
     if not f.title:
-        err("00024", "search needs a TITLE (what you would type into otr.datenkeller.net's search box)")
+        err("00023", "search needs a TITLE (what you would type into otr.datenkeller.net's search box)")
     return f
 
 
@@ -664,6 +666,7 @@ def pick_best(answer: str, filters: Filters, cap: QualityCap) -> Tuple[List[Reco
     """The search answer ("<file>;<size>..." per line) -> the best name of each
     recording the filters keep, oldest first; and how many files were offered."""
     by_slot: Dict[Tuple[Slot, str], Dict[Quality, Recording]] = {}
+    unknown: Dict[str, List[str]] = {}
     offered = 0
     for n, line in enumerate(answer.splitlines(), 1):
         name = line.split(";", 1)[0].strip()
@@ -672,13 +675,18 @@ def pick_best(answer: str, filters: Filters, cap: QualityCap) -> Tuple[List[Reco
         offered += 1
         rec = parse_otr_name(name)
         if rec is None:
-            err("00025", f"otr.datenkeller.net answered a line that is no OTR file (line {n}): {line[:100]}")
-        if rec.quality is None:
+            err("00024", f"otr.datenkeller.net answered a line that is no OTR file (line {n}): {line[:100]}")
+        if rec.unknown:
+            unknown.setdefault(rec.unknown, []).append(name)
+        elif rec.quality is None:
             OUT.dbg(f"an add-on, not a recording: {name}")
         elif not filters.keeps(rec):
             OUT.dbg(f"filtered out: {name}")
         else:
             by_slot.setdefault((rec.slot, rec.title.lower()), {})[rec.quality] = rec
+    for q, names in sorted(unknown.items()):
+        OUT.warn(f"{len(names)} file(s) in the quality '{q}' skipped -- my-otr does not know it yet "
+                 f"(e.g. {names[0]})")
     best = [next(by_slot[k][q] for q in preference(cap) if q in by_slot[k]) for k in sorted(by_slot)]
     return best, offered
 
@@ -702,16 +710,16 @@ class Reply:
         try:
             data: object = json.loads(self.body)
         except ValueError:
-            err("00026", f"{what}: no JSON in the answer [HTTP {self.status}]: {self.text()[:120]}")
+            err("00025", f"{what}: no JSON in the answer [HTTP {self.status}]: {self.text()[:120]}")
         if not isinstance(data, dict):
-            err("00027", f"{what}: the answer is no JSON object [HTTP {self.status}]")
+            err("00026", f"{what}: the answer is no JSON object [HTTP {self.status}]")
         return cast(Dict[str, object], data)
 
 
 def field_str(obj: Dict[str, object], key: str, what: str) -> str:
     v = obj.get(key)
     if not isinstance(v, str) or not v:
-        err("00028", f"{what}: the answer has no '{key}'")
+        err("00027", f"{what}: the answer has no '{key}'")
     return v
 
 
@@ -749,7 +757,7 @@ def fetch(method: str, url: str, *, json_body: Optional[Dict[str, str]] = None,
     try:
         reply = (via or _transport)(urllib.request.Request(url, data=body, headers=head, method=method), timeout)
     except (urllib.error.URLError, OSError) as e:
-        err("00029", f"{method} {urllib.parse.urlsplit(url).netloc}: no answer "
+        err("00028", f"{method} {urllib.parse.urlsplit(url).netloc}: no answer "
                      f"({getattr(e, 'reason', None) or e}) -- is the network up?")
     OUT.dbg(f"HTTP {reply.status}, {len(reply.body)} bytes")
     return reply
@@ -765,7 +773,7 @@ def datenkeller_api(s: Settings, query: str) -> str:
     url = f"{DK_SITE}/?jdlAPI&account={urllib.parse.quote(s.secret('DATENKELLER_LOGIN'))}&apikey={key}&{query}"
     reply = fetch("GET", url)
     if reply.status >= 400:
-        err("00030", f"otr.datenkeller.net: HTTP {reply.status} for {shown_url(url)}")
+        err("00029", f"otr.datenkeller.net: HTTP {reply.status} for {shown_url(url)}")
     return reply.text()
 
 
@@ -795,7 +803,7 @@ def datenkeller_login(s: Settings, force: bool) -> None:
                         ("xjxargs[]", "S" + s.secret("DATENKELLER_PASSW")),
                         ("xjxargs[]", "Se64182db4a8ab14dcaf986037092f6c0")])
     if reply.status >= 400:
-        err("00031", f"otr.datenkeller.net login: HTTP {reply.status}")
+        err("00030", f"otr.datenkeller.net login: HTTP {reply.status}")
     old = os.umask(0o077)
     try:
         jar.save(ignore_discard=True)
@@ -816,7 +824,7 @@ def name_of_line(line: str) -> str:
     for c in cands:
         if parse_otr_name(c) is not None:
             return c
-    err("00032", f"not an OTR file name, nor a URL of one: {s[:120]}")
+    err("00031", f"not an OTR file name, nor a URL of one: {s[:120]}")
 
 
 def download_link(s: Settings, name: str) -> str:
@@ -824,7 +832,7 @@ def download_link(s: Settings, name: str) -> str:
     answer = datenkeller_api(s, "getLinkFor=" + urllib.parse.quote(name))
     m = re.search(r"^OK: (\S+)", answer, re.MULTILINE)
     if m is None:
-        err("00033", f"otr.datenkeller.net gave no download link for {name}: {answer.strip()[:160]}")
+        err("00032", f"otr.datenkeller.net gave no download link for {name}: {answer.strip()[:160]}")
     return m.group(1)
 
 
@@ -834,15 +842,15 @@ def aria2c(s: Settings, url: str, name: str, folder: Path) -> None:
     phase(f"downloading {name}")
     exe = shutil.which(s.dl_cmd)
     if exe is None:
-        err("00034", f"OTR_DL_CMD '{s.dl_cmd}' not found")
+        err("00033", f"OTR_DL_CMD '{s.dl_cmd}' not found")
     cmd = [exe, *s.dl_params, "--input-file=-"]
     OUT.det(f" >>> {shlex.join(cmd)}   (stdin: the URL, out={name})")
     rc = subprocess.run(cmd, input=f"{url}\n  out={name}\n", text=True, cwd=folder).returncode
     target = folder / name
     if rc != 0:
-        err("00035", f"{Path(exe).name} failed [rc {rc}] on {name}")
+        err("00034", f"{Path(exe).name} failed [rc {rc}] on {name}")
     if not target.is_file() or target.stat().st_size == 0 or unfinished(target):
-        err("00036", f"{Path(exe).name} ended [rc 0], but {target} is not complete")
+        err("00035", f"{Path(exe).name} ended [rc 0], but {target} is not complete")
 
 
 # --- 5. the OTR protocol ---------------------------------------------------
@@ -940,26 +948,26 @@ def read_otr2_header(path: Path) -> Otr2Header:
     with path.open("rb") as f:
         pre = f.read(OTR2_PREAMBLE)
         if len(pre) < OTR2_PREAMBLE or pre[:8] != OTR2_MAGIC:
-            err("00037", f"{path.name}: not an .otr2 file ({len(pre)} bytes of preamble) -- a broken download?")
+            err("00036", f"{path.name}: not an .otr2 file ({len(pre)} bytes of preamble) -- a broken download?")
         version, hlen = int.from_bytes(pre[8:10], "little"), int.from_bytes(pre[12:16], "little")
         if version != 1 or not 0 < hlen <= 64 * 1024:
-            err("00038", f"{path.name}: .otr2 version {version}, header {hlen} bytes -- not one my-otr knows")
+            err("00037", f"{path.name}: .otr2 version {version}, header {hlen} bytes -- not one my-otr knows")
         try:
             raw: object = json.loads(f.read(hlen))
         except ValueError:
-            err("00039", f"{path.name}: the .otr2 header is no JSON")
+            err("00038", f"{path.name}: the .otr2 header is no JSON")
     if not isinstance(raw, dict):
-        err("00040", f"{path.name}: the .otr2 header is no JSON object")
+        err("00039", f"{path.name}: the .otr2 header is no JSON object")
     h = cast(Dict[str, object], raw)
     scheme, iv, size, ctype = h.get("scheme", OTR2_SCHEME), h.get("iv"), h.get("size", 0), h.get("content_type")
     if scheme != OTR2_SCHEME or not isinstance(iv, str) or not isinstance(size, int):
-        err("00041", f"{path.name}: .otr2 scheme {scheme!r} -- my-otr knows {OTR2_SCHEME}")
+        err("00040", f"{path.name}: .otr2 scheme {scheme!r} -- my-otr knows {OTR2_SCHEME}")
     try:
         nonce = bytes.fromhex(iv)
     except ValueError:
         nonce = b""
     if len(nonce) != 12:
-        err("00042", f"{path.name}: the .otr2 IV is not 12 bytes")
+        err("00041", f"{path.name}: the .otr2 IV is not 12 bytes")
     raw_end = OTR2_PREAMBLE + hlen
     return Otr2Header(field_str(h, "rec", path.name), nonce, size,
                       ctype if isinstance(ctype, str) else "video/mp4", raw_end + (-raw_end) % OTR2_ALIGN)
@@ -994,14 +1002,14 @@ class OtrSession:
             r = fetch("POST", f"{OTR_API}/api/auth/login",
                       json_body={"email": self._s.secret("OTR_LOGIN"), "password": self._s.secret("OTR_PASSW")})
             if r.status == 401:
-                err("00043", "onlinetvrecorder.com refused the login -- check OTR_LOGIN / OTR_PASSW")
+                err("00042", "onlinetvrecorder.com refused the login -- check OTR_LOGIN / OTR_PASSW")
             if r.status >= 400:
-                err("00044", f"onlinetvrecorder.com login: HTTP {r.status}: {_otr_reason(r)}")
+                err("00043", f"onlinetvrecorder.com login: HTTP {r.status}: {_otr_reason(r)}")
             self._jwt = field_str(r.obj("the OTR login"), "token", "the OTR login")
         if self._ticket is None or time.time() > self._ticket_exp - 30:
             r = fetch("GET", f"{OTR_API}/api/otr2/ticket", headers={"Authorization": f"Bearer {self._jwt}"})
             if r.status >= 400:
-                err("00045", f"onlinetvrecorder.com ticket: HTTP {r.status}: {_otr_reason(r)}")
+                err("00044", f"onlinetvrecorder.com ticket: HTTP {r.status}: {_otr_reason(r)}")
             obj = r.obj("the OTR ticket")
             exp = obj.get("exp")
             self._ticket = field_str(obj, "ticket", "the OTR ticket")
@@ -1018,11 +1026,11 @@ class OtrSession:
             serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
         r = fetch("POST", f"{OTR_KEYS}/key", json_body={"rec": rec, "token": self._ticket_now(), "client_pub": pub})
         if r.status == 403:
-            err("00046", f"onlinetvrecorder.com: no right to recording {rec}: {_otr_reason(r)}")
+            err("00045", f"onlinetvrecorder.com: no right to recording {rec}: {_otr_reason(r)}")
         if r.status == 404:
-            err("00047", f"onlinetvrecorder.com: recording {rec} is not on the key server")
+            err("00046", f"onlinetvrecorder.com: recording {rec} is not on the key server")
         if r.status >= 400:
-            err("00048", f"onlinetvrecorder.com key: HTTP {r.status}: {_otr_reason(r)}")
+            err("00047", f"onlinetvrecorder.com key: HTTP {r.status}: {_otr_reason(r)}")
         obj = r.obj("the OTR key")
         try:
             # ECIES: the server's ephemeral P-256 point (65) | nonce (12) | AES-GCM of the key
@@ -1032,7 +1040,7 @@ class OtrSession:
                 self._priv.exchange(ec.ECDH(), eph))
             cek = AESGCM(kek).decrypt(wrapped[65:77], wrapped[77:], None)
         except (ValueError, TypeError) as e:
-            err("00049", f"onlinetvrecorder.com: the key of {rec} cannot be unwrapped ({type(e).__name__})")
+            err("00048", f"onlinetvrecorder.com: the key of {rec} cannot be unwrapped ({type(e).__name__})")
         sha = obj.get("plaintext_sha256")
         return cek, (sha.lower() if isinstance(sha, str) and sha else None)
 
@@ -1041,11 +1049,11 @@ class OtrSession:
                                             ("password", self._s.secret("OTR_PASSW")), ("FN", fn), ("OH", oh)])
         obj = r.obj("the .otrkey key service")
         if "error" in obj:
-            err("00050", f"onlinetvrecorder.com refused the key of {fn}: {obj.get('message') or obj['error']}")
+            err("00049", f"onlinetvrecorder.com refused the key of {fn}: {obj.get('message') or obj['error']}")
         try:
             return bytes.fromhex(field_str(obj, "random_key", "the .otrkey key service"))
         except ValueError:
-            err("00051", f"onlinetvrecorder.com: the key of {fn} is no hex string")
+            err("00050", f"onlinetvrecorder.com: the key of {fn} is no hex string")
 
 
 def otrkey_fields(path: Path) -> Dict[str, str]:
@@ -1053,7 +1061,7 @@ def otrkey_fields(path: Path) -> Dict[str, str]:
     with path.open("rb") as f:
         head = f.read(len(OTRKEY_MAGIC) + OTRKEY_HEADER)
     if len(head) < len(OTRKEY_MAGIC) + OTRKEY_HEADER or not head.startswith(OTRKEY_MAGIC):
-        err("00052", f"{path.name}: not an .otrkey file -- a broken download?")
+        err("00051", f"{path.name}: not an .otrkey file -- a broken download?")
     text = OtrBlowfish(OTRKEY_HEADER_KEY).decrypt(head[len(OTRKEY_MAGIC):]).split(b"\0", 1)[0]
     return dict(p.split("=", 1) for p in text.decode("latin-1").split("&") if "=" in p)
 
@@ -1090,7 +1098,7 @@ def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
     have, want = path.stat().st_size, h.body_offset + h.size
     if h.size and have < want:
         # before the key is asked for: every key OTR hands out counts as a decode
-        err("00053", f"{path.name}: incomplete download ({have} of {want} bytes) -- no key asked for")
+        err("00052", f"{path.name}: incomplete download ({have} of {want} bytes) -- no key asked for")
     cek, sha_want = session.otr2_key(h.rec)
     dec = Cipher(algorithms.AES(cek), modes.CTR(h.nonce + b"\0\0\0\0")).decryptor()
     sha, done = hashlib.sha256(), 0
@@ -1107,11 +1115,11 @@ def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
         dst.flush()
         os.fsync(dst.fileno())
     if h.size and done != h.size:
-        err("00054", f"{path.name}: {done} of {h.size} bytes decoded")
+        err("00053", f"{path.name}: {done} of {h.size} bytes decoded")
     if sha_want is None:
         return f"{done} bytes, OTR sent no checksum"
     if sha.hexdigest() != sha_want:
-        err("00055", f"{path.name}: the decoded content differs from the recording "
+        err("00054", f"{path.name}: the decoded content differs from the recording "
                      f"(sha256 {sha.hexdigest()[:12]} != OTR's {sha_want[:12]}) -- the source is kept")
     return f"sha256 {sha_want[:12]} = OTR's"
 
@@ -1119,7 +1127,7 @@ def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
 def _decode_otrkey(session: OtrSession, path: Path, part: Path) -> str:
     fields = otrkey_fields(path)
     if not fields.get("OH"):
-        err("00056", f"{path.name}: the .otrkey header has no OH")
+        err("00055", f"{path.name}: the .otrkey header has no OH")
     bf = OtrBlowfish(session.otrkey_key(fields.get("FN", path.name), fields["OH"]))
     done = 0
     with path.open("rb") as src, part.open("wb") as dst:
@@ -1142,7 +1150,7 @@ def update_check(zip_path: Path) -> int:
         with zipfile.ZipFile(zip_path) as z:
             files = {Path(n).name: z.read(n) for n in z.namelist() if n.endswith(".py")}
     except (OSError, zipfile.BadZipFile) as e:
-        err("00057", f"{zip_path}: not a readable zip ({e})")
+        err("00056", f"{zip_path}: not a readable zip ({e})")
     source = b"\n".join(files.values()).decode("utf-8", "replace")
     m = re.search(r"__version__ = '([^']+)'", source)
     OUT.result(f" >>> OTR's decoder {m.group(1) if m else '(no __version__)'}, against the reviewed {REFERENCE_RELEASE}:")
@@ -1170,7 +1178,7 @@ def cmd_search(s: Settings, args: Sequence[str]) -> int:
     OUT.msg(f" >>> searching otr.datenkeller.net for \"{title}\"")
     answer = datenkeller_api(s, f"suche={urllib.parse.quote(title)}&details&limit=-1")
     if not answer.strip():
-        err("00058", f"otr.datenkeller.net answered nothing for \"{title}\"")
+        err("00057", f"otr.datenkeller.net answered nothing for \"{title}\"")
     best, offered = pick_best(answer, filters, s.quality_cap)
     for rec in best:
         OUT.result(rec.name)
@@ -1200,6 +1208,10 @@ def cmd_get(s: Settings, decode: bool, force: bool) -> int:
     for name in names:
         rec = parse_otr_name(name)
         assert rec is not None, "name_of_line returns names that parse"
+        if rec.unknown:
+            OUT.warn(f"{name}: the quality '{rec.unknown}' is new -- my-otr does not know it yet; skipped")
+            t.skipped += 1
+            continue
         if rec.quality is None:
             OUT.det(f"    > {name}: an add-on, not a recording -- skipped")
             t.skipped += 1
@@ -1223,7 +1235,7 @@ def cmd_get(s: Settings, decode: bool, force: bool) -> int:
             + (f"{t.decoded} decoded" if decode else "none decoded (--no-decode)")
             + (f", {len(t.failed)} FAILED" if t.failed else ""))
     if t.failed:
-        err("00059", f"{len(t.failed)} failed: " + ", ".join(t.failed))
+        err("00058", f"{len(t.failed)} failed: " + ", ".join(t.failed))
     return 0
 
 
@@ -1242,7 +1254,7 @@ def decode_all(s: Settings, files: Sequence[Path], outdir: Path, force: bool, t:
     for path in files:
         try:
             if not path.is_file():
-                err("00060", f"{path}: no such file")
+                err("00059", f"{path}: no such file")
             out = outdir / decoded_name(path)
             if out.exists() and not force:
                 OUT.msg(f"    > {path.name}: decoded already as {out.name} -- left as it is (-F decodes again)")
@@ -1270,13 +1282,13 @@ def cmd_decode(s: Settings, args: Sequence[str], force: bool) -> int:
         OUT.msg(f" >>> writing into {outdir} (DEFAULT_DECODE_OUTP_DIR)")
         outdir.mkdir(parents=True, exist_ok=True)
     else:
-        err("00061", "decode: no <DIR> given, and DEFAULT_DECODE_OUTP_DIR is not set")
+        err("00060", "decode: no <DIR> given, and DEFAULT_DECODE_OUTP_DIR is not set")
     if not items:
-        err("00062", "decode: no file given")
+        err("00061", "decode: no file given")
     t = Tally(read=len(items))
     decode_all(s, [Path(i) for i in items], outdir, force, t)
     if t.failed:
-        err("00063", f"{len(t.failed)} of {t.read} failed: " + ", ".join(t.failed))
+        err("00062", f"{len(t.failed)} of {t.read} failed: " + ", ".join(t.failed))
     return 0
 
 
@@ -1331,7 +1343,8 @@ COMMANDS
 
   Decoding removes the source once the result is complete and -- where OTR
   sends one -- matches its checksum. The quality taken: HQ, then the small
-  ones, then HD (HD first with OTR_QUALITY_CAP="HD").
+  ones, then HD (HD first with OTR_QUALITY_CAP="HD"). A file in a quality
+  my-otr does not know yet is skipped, with a WARNING naming it.
 
 OPTIONS
   -Q, --quiet              nothing on the terminal but results and errors
@@ -1384,7 +1397,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
             if c.command is None:
                 if a not in COMMANDS:
                     hint = f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else ""
-                    err("00064", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
+                    err("00063", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
                 c.command = COMMANDS[a]
             else:
                 c.args.append(a)
@@ -1407,7 +1420,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif key in ("--log-file", "--config"):
             v = val if eq else next(it, None)
             if not v:
-                err("00065", f"{key} needs a <FILE>")
+                err("00064", f"{key} needs a <FILE>")
             if key == "--config":
                 c.config = v
             else:
@@ -1419,9 +1432,9 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         else:
             verb = a.lstrip("-")
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
-            err("00066", f"no such option '{a}'{hint}")
+            err("00065", f"no such option '{a}'{hint}")
     if c.no_decode and c.command != "get":
-        err("00067", "--no-decode goes with 'get'")
+        err("00066", "--no-decode goes with 'get'")
     return c
 
 
@@ -1435,7 +1448,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00068", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00067", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -1448,7 +1461,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00069", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00068", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -1468,7 +1481,7 @@ def run(argv: Sequence[str]) -> int:
         return 0
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00070", "update-check needs the <ZIP> of OTR's decoder")
+            err("00069", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -1478,7 +1491,7 @@ def run(argv: Sequence[str]) -> int:
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00071", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00070", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
@@ -1505,7 +1518,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00072 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00071 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -1513,7 +1526,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00073 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00072 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -1617,8 +1630,20 @@ def t_search_best_quality(t: T) -> None:
                       "B__Folge_2_26.10.06_22-15_zdfneo_45_TVOON_DE.LQ.otr2",
                       "E_26.10.08_01-30_ard_120_TVOON_DE.HD.otr2"],
             f"HQ over LQ and HD, oldest first, never an add-on or AC3, HD when alone: {names}")
-    rc, names, errs = _t_searched(t, answer=SEARCH_ANSWER + "F_26.10.09_10-15_zdf_10_TVOON_DE.UHD.otr2;1;0\n")
-    t.check(rc == 1 and "ERROR 00015" in errs and not names, f"a quality never seen stops the search: rc {rc} {errs}")
+    rc, names, errs = _t_searched(t, answer=SEARCH_ANSWER + "F_26.10.09_10-15_zdf_10_TVOON_DE.UHD.otr2;1;0\n"
+                                  "G_26.10.09_11-15_zdf_10_TVOON_DE.UHD.otr2;1;0\n")
+    t.check(rc == 0 and len(names) == 4 and not any(n.startswith(("F_", "G_")) for n in names),
+            f"a quality never seen is skipped, the others still found: rc {rc} {names} {errs}")
+    t.check(errs.count("WARNING: 2 file(s) in the quality 'UHD' skipped") == 1,
+            f"one WARNING per unknown quality, with the count: {errs}")
+    rc, names, errs = _t_searched(t, answer="H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.otr2;1;0\n"
+                                  "H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.LQ.otr2;1;0\n")
+    t.check(rc == 0 and names == ["H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.otr2"],
+            f"OTR's mpg.HQ / mpg.LQ .otr2 names are known, HQ over LQ: {names} {errs}")
+    t.check(local_quality("H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.mp4") == "HQ"
+            and local_quality("H_26.10.10_20-15_zdf_45_TVOON_DE.HQ.mp4") == "HQ"
+            and local_quality("H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.avi") == "HQ",
+            "a decoded mpg.HQ.otr2 counts as an HQ copy here")
     t.routes[DK_SITE] = lambda req: Reply(200, SEARCH_ANSWER.encode())
     cap_hd = t.run(["--config", str(t.config('OTR_QUALITY_CAP="HD"\n')), "search", "x"])[1].split()
     t.check("A__Folge_1_26.10.04_10-15_zdf_100_TVOON_DE.HD.otr2" in cap_hd, f"OTR_QUALITY_CAP=HD takes HD: {cap_hd}")
@@ -1645,23 +1670,23 @@ def t_search_filters(t: T) -> None:
         got = first_letters(*args)
         t.check(got == want, f"{what}: {args} -> {got}")
     rc, _, errs = _t_searched(t, ",", "desc")
-    t.check(rc == 1 and "ERROR 00018" in errs, "a DESCRIPTION search is refused, not silently ignored")
+    t.check(rc == 1 and "ERROR 00017" in errs, "a DESCRIPTION search is refused, not silently ignored")
     rc, _, errs = _t_searched(t, "@2026-10-06", ">2026-10-01")
-    t.check(rc == 1 and "ERROR 00023" in errs, "@DATE with >DATE is refused")
+    t.check(rc == 1 and "ERROR 00022" in errs, "@DATE with >DATE is refused")
 
 
 def t_search_fails_loud(t: T) -> None:
     rc, names, errs = _t_searched(t, answer="<html>Wartungsarbeiten</html>\n")
-    t.check(rc == 1 and "ERROR 00025" in errs and not names, f"an answer that is no list fails: rc {rc}")
+    t.check(rc == 1 and "ERROR 00024" in errs and not names, f"an answer that is no list fails: rc {rc}")
     rc, names, errs = _t_searched(t, answer="")
-    t.check(rc == 1 and "ERROR 00058" in errs, "an empty answer fails")
+    t.check(rc == 1 and "ERROR 00057" in errs, "an empty answer fails")
     t.routes[DK_SITE] = lambda req: Reply(503, b"down")
     rc, out, errs = t.run(["--config", str(t.config()), "-V", "search", "x"])
-    t.check(rc == 1 and "ERROR 00030" in errs and "apikey=***" in errs, f"HTTP 503 fails, the key hidden: {errs}")
+    t.check(rc == 1 and "ERROR 00029" in errs and "apikey=***" in errs, f"HTTP 503 fails, the key hidden: {errs}")
     t.no_secret(out + errs, "a failed search's output")
     t.routes.clear()
     rc, out, errs = t.run(["--config", str(t.config()), "search", "x"])
-    t.check(rc == 1 and "ERROR 00029" in errs and "otr.datenkeller.net: no answer" in errs, f"no network: {errs}")
+    t.check(rc == 1 and "ERROR 00028" in errs and "otr.datenkeller.net: no answer" in errs, f"no network: {errs}")
     t.no_secret(out + errs, "a search without network")
 
 
@@ -1685,7 +1710,7 @@ def t_get_name_forms(t: T) -> None:
             name_of_line(line)
             t.check(False, f"no OTR name, refused: {line}")
         except OtrError as e:
-            t.check(e.code == "00032", e.text)
+            t.check(e.code == "00031", e.text)
 
 
 def _t_get(t: T, names: str, *opts: str) -> Tuple[int, str, str]:
@@ -1735,7 +1760,7 @@ def t_get_duplicates(t: T) -> None:
     _, _, errs = _t_get(t, f"{base}.HQ.otr2\n")
     t.check("1 downloaded" in errs, f"an add-on is no copy; an unfinished one (.aria2 beside it) is resumed: {errs}")
     rc, _, errs = _t_get(t, f"{base}.LQ.otr2\nnonsense\n")
-    t.check(rc == 1 and "ERROR 00032" in errs and "downloaded" not in errs, "a bad line stops get before any download")
+    t.check(rc == 1 and "ERROR 00031" in errs and "downloaded" not in errs, "a bad line stops get before any download")
 
 
 def _t_otr2_file(t: T, name: str, plain: bytes, cek: bytes, size: Optional[int] = None) -> Path:
@@ -1798,7 +1823,7 @@ def t_decode_otr2_wrong_checksum(t: T) -> None:
     src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", plain, cek)
     _t_key_server(t, cek, hashlib.sha256(b"something else").hexdigest())
     rc, _, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
-    t.check(rc == 1 and "ERROR 00055" in errs, f"a checksum mismatch fails: rc {rc}: {errs}")
+    t.check(rc == 1 and "ERROR 00054" in errs, f"a checksum mismatch fails: rc {rc}: {errs}")
     t.check(src.exists(), "the source is kept")
     t.check(sorted(p.name for p in t.dir.iterdir() if "Foo" in p.name) == [src.name], "no decoded file, no .part left")
 
@@ -1808,7 +1833,7 @@ def t_decode_otr2_incomplete(t: T) -> None:
     src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", b"x" * 100, cek, size=5000)
     _t_key_server(t, cek, "")
     rc, _, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
-    t.check(rc == 1 and "ERROR 00053" in errs, f"an incomplete .otr2 fails: {errs}")
+    t.check(rc == 1 and "ERROR 00052" in errs, f"an incomplete .otr2 fails: {errs}")
     t.check(not any(u.startswith(OTR_KEYS) for _, u, _ in t.requests), "... before a key is asked for (each one counts)")
 
 
@@ -1892,7 +1917,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00069" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00068" in errs, "never over an existing file")
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
             f"the defaults parse cleanly, and an empty credential is named: {errs}")
@@ -1987,7 +2012,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00073 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00072 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()

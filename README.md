@@ -71,7 +71,8 @@ Usage
 
       Decoding removes the source once the result is complete and -- where OTR
       sends one -- matches its checksum. The quality taken: HQ, then the small
-      ones, then HD (HD first with OTR_QUALITY_CAP="HD").
+      ones, then HD (HD first with OTR_QUALITY_CAP="HD"). A file in a quality
+      my-otr does not know yet is skipped, with a WARNING naming it.
 
     OPTIONS
       -Q, --quiet              nothing on the terminal but results and errors
