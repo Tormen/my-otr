@@ -47,11 +47,12 @@ Programmed recordings
 `my-otr record <FOLDER> <TITLE> [<FILTER>..] [--max <N>]` takes the same words
 as `search`, shows what the search finds now, and adds one `record` line to
 `RECORDINGS_FILE` (default `~/.my-otr.recordings`; an editor is as good -- the
-file explains itself). FOLDER is absolute, or below `LIBRARY_DIR`.
+file explains itself), the folder and the title always in `''`. FOLDER is
+absolute, or below `LIBRARY_DIR`.
 
-    my-otr record series/bares/ 'bares fuer rares' @zdf '>1d' @15:05        # every day it is on
-    my-otr record series/heute/ 'heute show' @zdf '>7d' --max 2             # weekly, 2 at most
-    my-otr record /Volumes/films/ tatort @ard @2026-11-03 @20:15 --max 1    # one evening
+    my-otr record 'series/bares/' 'bares fuer rares' @zdf '>1d' @15:05        # every day it is on
+    my-otr record 'series/heute/' 'heute show' @zdf '>7d' --max 2             # weekly, 2 at most
+    my-otr record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1    # one evening
 
 - `my-otr refresh` searches each recording and gets the new ones into its
   folder (`--dry-run`: search only; `refresh <TEXT>`: only the lines holding
@@ -154,4 +155,4 @@ Usage
     EXAMPLES
       my-otr search "bares fuer rares" @zdf '>2026-02-28' @15:05
       my-otr search "bares fuer rares" | my-otr get
-      my-otr record /Volumes/films/ tatort @ard @2026-11-03 @20:15 --max 1
+      my-otr record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1

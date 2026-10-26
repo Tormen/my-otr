@@ -1393,13 +1393,13 @@ RECORDINGS_HEAD: Final = """\
 ##             recurring one), @2026-11-03 (that day), '>2026-11-01' '<2026-11-07'
 ##   --max <N> fetch at most N new ones per refresh (default: all)
 ## e.g. -- a show, every day it is on:
-##   record series.de/bares.fuer.rares/s0x/ 'bares fuer rares' @zdf '>1d' @15:05
+##   record 'series.de/bares.fuer.rares/s0x/' 'bares fuer rares' @zdf '>1d' @15:05
 ## a weekly show, at most 2 a run:
-##   record series.de/heute.show/s0x/ 'heute show' @zdf '>7d' '>18h' '<23h' --max 2
+##   record 'series.de/heute.show/s0x/' 'heute show' @zdf '>7d' '>18h' '<23h' --max 2
 ## one evening:
-##   record /Volumes/films/ tatort @ard @2026-11-03 @20:15 --max 1
+##   record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1
 ## a week:
-##   record sport/ olympia @zdf '>2026-11-01' '<2026-11-07'
+##   record 'sport/' 'olympia' @zdf '>2026-11-01' '<2026-11-07'
 """
 
 
@@ -1419,8 +1419,14 @@ class Programmed:
         return shlex.join(self.words)
 
     def line(self) -> str:
-        return shlex.join(["record", self.folder_text, *self.words,
-                           *(["--max", str(self.max)] if self.max is not None else [])])
+        """The line as written back: the folder and the title always in '' (one
+        look tells them apart), the filters quoted only where the shell needs it."""
+        def sq(w: str) -> str:
+            return "'" + w.replace("'", "'\"'\"'") + "'"
+        title, *filters = self.words
+        return " ".join(["record", sq(self.folder_text), sq(title),
+                         *(shlex.quote(w) for w in filters),
+                         *(["--max", str(self.max)] if self.max is not None else [])])
 
     def outdated(self, s: Settings, today: datetime.date) -> bool:
         """A one-off whose last day is more than PAST_AFTER_DAYS ago (#47)."""
@@ -1946,7 +1952,7 @@ CONFIG  KEY="value" lines, read and never run -- the first found of
 EXAMPLES
   {SCRIPT_NAME} search "bares fuer rares" @zdf '>2026-02-28' @15:05
   {SCRIPT_NAME} search "bares fuer rares" | {SCRIPT_NAME} get
-  {SCRIPT_NAME} record /Volumes/films/ tatort @ard @2026-11-03 @20:15 --max 1"""
+  {SCRIPT_NAME} record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1"""
 
 COMMANDS: Final = {"search": "search", "get": "get", "dl": "dl", "download": "dl", "decode": "decode",
                    "login": "login", "update-check": "update-check", "help": "help",
@@ -2719,12 +2725,15 @@ def t_relative_date(t: T) -> None:
 def t_record_lines(t: T) -> None:
     rec = (RECORDINGS_HEAD + "record shows/a/ 'alpha three' @zdf '>1d' --max 2\n"
            f"record {t.dir}/films/ beta @ard @2026-11-03 @20:15\n"
-           "record old/ gamma @ard @2020-01-01   # a comment\n\n")
+           "record old/ gamma @ard @2020-01-01   # a comment\n"
+           "record \"it's/\" \"rock'n roll\" @zdf\n\n")
     conf = _t_rec_config(t, rec)
     rc, out, errs = t.run(["--config", str(conf), "list"])
     lines = out.splitlines()
-    t.check(rc == 0 and lines[0] == "record shows/a/ 'alpha three' @zdf '>1d' --max 2", f"a relative folder: {out}")
-    t.check(lines[1] == f"record {t.dir}/films/ beta @ard @2026-11-03 @20:15", f"an absolute folder: {lines[1]}")
+    t.check(rc == 0 and lines[0] == "record 'shows/a/' 'alpha three' @zdf '>1d' --max 2", f"a relative folder: {out}")
+    t.check(lines[1] == f"record '{t.dir}/films/' 'beta' @ard @2026-11-03 @20:15", f"an absolute folder: {lines[1]}")
+    back = [w for w in shlex.split(lines[-1])]
+    t.check(back == ["record", "it's/", "rock'n roll", "@zdf"], f"a ' inside the folder and title: {lines[-1]} -> {back}")
     t.check(lines[2].endswith("outdated -- please check/remove") and "1 outdated" in errs, f"outdated marked: {out}")
     for bad, want in (("show x y\n", "not a `record` line"), ("record shows/ x --max 0\n", "--max '0'"),
                       ("record shows/\n", "record <FOLDER> <TITLE>"), ("record shows/ x '>2026-13-01'\n", "no such date")):
@@ -2741,7 +2750,7 @@ def t_record_adds(t: T) -> None:
     (t.dir / "rec").unlink()
     rc, _, errs = t.run(["--config", str(conf), "record", "movies/", "alpha one", "@zdf", ">1d", "--max", "1"])
     text = (t.dir / "rec").read_text(encoding="utf-8")
-    t.check(rc == 0 and text.startswith(RECORDINGS_HEAD) and text.endswith("record movies/ 'alpha one' @zdf '>1d' --max 1\n"),
+    t.check(rc == 0 and text.startswith(RECORDINGS_HEAD) and text.endswith("record 'movies/' 'alpha one' @zdf '>1d' --max 1\n"),
             f"a new file: the explanation, then the line: {text[-120:]} {errs}")
     t.check("found 1 now" in errs and "alpha_one_0" in errs and "recorded:" in errs, f"what the search finds now: {errs}")
     t.check(any(c.startswith("search alpha one @zdf >1d") for c in _t_lines(calls)), f"searched once: {_t_lines(calls)}")
