@@ -444,6 +444,7 @@ _OTR_NAME: Final = re.compile(
 # what follows "TVOON_DE." -- None: an add-on (a ZIP, an AC3 track), never a recording
 _OTR_QUALITY: Final[Dict[str, Optional[Quality]]] = {
     "mpg.hq.avi": "HQ", "mpg.hd.avi": "HD", "mpg.avi": "DivX", "mpg.mp4": "MP4",  # .otrkey
+    "mpg.hq.mp4": "HQ",                                                          # .otrkey, seen 2026-10
     "hq": "HQ", "hd": "HD", "lq": "LQ",                                         # .otr2
     "mpg.hq": "HQ", "mpg.hd": "HD", "mpg.lq": "LQ",                             # .otr2, named since 2026-08
     "mpg.addon": None, "mpg.hd.ac3": None,
@@ -1640,6 +1641,9 @@ def t_search_best_quality(t: T) -> None:
                                   "H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.LQ.otr2;1;0\n")
     t.check(rc == 0 and names == ["H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.otr2"],
             f"OTR's mpg.HQ / mpg.LQ .otr2 names are known, HQ over LQ: {names} {errs}")
+    rc, names, errs = _t_searched(t, answer="Q_26.07.22_14-00_ardalpha_45_TVOON_DE.mpg.HQ.mp4.otrkey;1;0\n")
+    t.check(rc == 0 and names == ["Q_26.07.22_14-00_ardalpha_45_TVOON_DE.mpg.HQ.mp4.otrkey"] and "WARNING" not in errs,
+            f"an .otrkey in mpg.HQ.mp4 is HQ, no longer skipped: {names} {errs}")
     t.check(local_quality("H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.mp4") == "HQ"
             and local_quality("H_26.10.10_20-15_zdf_45_TVOON_DE.HQ.mp4") == "HQ"
             and local_quality("H_26.10.10_20-15_zdf_45_TVOON_DE.mpg.HQ.avi") == "HQ",
