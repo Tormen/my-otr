@@ -1551,6 +1551,15 @@ def run_child(argv: Sequence[str], timeout: int, folder: Path, stdin: str = "",
     return p.returncode, out or ""
 
 
+def here_already(s: Settings, name: str, folder: Path) -> bool:
+    """A copy of NAME in FOLDER as good as get would want -- get skips it, so
+    refresh does not hand it over, and --max counts only the new ones."""
+    rec = parse_otr_name(name)
+    if rec is None or rec.unknown or rec.quality is None or not folder.is_dir():
+        return False                    # get decides, and says why
+    return as_good_here(rec, rec.quality, folder, s.quality_cap) is not None
+
+
 def found_now(s: Settings, rec: Programmed) -> Optional[Tuple[int, List[str]]]:
     """The search of one recording, as a child; (rc, names) or None on a timeout."""
     res = run_child([*_child, *child_options(s), "search", *rec.words], s.search_timeout,
@@ -1631,8 +1640,11 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                 failures.append(f"  {rec.search}: {why}")
                 OUT.warn(f"{rec.search}: {why}")
                 continue
-            names = found[1][:rec.max] if rec.max else found[1]
-            of = f"{len(found[1])} found" + (f", max {rec.max}" if rec.max else "")
+            here = [n for n in found[1] if here_already(s, n, rec.folder)]
+            new = [n for n in found[1] if n not in here]
+            names = new[:rec.max] if rec.max else new
+            of = (f"{len(found[1])} found" + (f", {len(here)} here already" if here else "")
+                  + (f", max {rec.max}" if rec.max else ""))
             if not names:
                 OUT.msg(f" >>> {rec.search}: nothing new [{of}]")
                 continue
@@ -2782,6 +2794,20 @@ def t_refresh(t: T) -> None:
     t.check(rc == 0 and "would fetch 2" in errs and not any(c.startswith("get") for c in _t_lines(calls)), errs)
 
 
+def t_refresh_here(t: T) -> None:
+    calls = _t_child(t)
+    conf = _t_rec_config(t, "record a/ 'alpha three' --max 2\nrecord d/ 'delta one'\n")
+    for d, name in (("a", "alpha_three_0_26.10.01"), ("a", "alpha_three_1_26.10.02"), ("d", "delta_one_0_26.10.01")):
+        (t.dir / "lib" / d).mkdir(parents=True, exist_ok=True)
+        (t.dir / "lib" / d / f"{name}_20-15_zdf_45_TVOON_DE.HQ.mp4").write_bytes(b"x")
+    rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    got = [c for c in _t_lines(calls) if c.startswith("got ")]
+    t.check(rc == 0 and [g.split()[1][:13] for g in got] == ["alpha_three_2"], f"only the one not here goes to get: {got}")
+    t.check("'alpha three': fetched 1 [3 found, 2 here already, max 2, rc 0]" in errs, f"--max counts the new ones: {errs}")
+    t.check("'delta one': nothing new [1 found, 1 here already]" in errs and not any(g.endswith("/lib/d") for g in got),
+            f"all here: nothing new, and no get at all: {errs}")
+
+
 def t_refresh_timeout(t: T) -> None:
     _t_child(t)
     conf = _t_rec_config(t, "record a/ 'alpha hang'\nrecord d/ 'delta one'\n", 'SEARCH_TIMEOUT="2"\n')
@@ -2881,7 +2907,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_get_name_forms, t_get_downloads_off_argv, t_get_duplicates, t_decode_otr2, t_decode_otr2_wrong_checksum,
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
     t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
-    t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_timeout, t_refresh_all_failed,
+    t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_timeout, t_refresh_all_failed,
     t_refresh_outdated, t_refresh_lock, t_state, t_install, t_test_mail,
 ]
 
