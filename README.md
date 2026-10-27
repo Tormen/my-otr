@@ -50,7 +50,7 @@ as `search`, shows what the search finds now, and adds one `record` line to
 file explains itself), the folder and the title always in `''`. FOLDER is
 absolute, or below `LIBRARY_DIR`.
 
-    my-otr record 'series/bares/' 'bares fuer rares' @zdf '>1d' @15:05        # every day it is on
+    my-otr record 'series/bares/' 'bares fuer rares' @zdf '>8d' @15:05        # every day it is on
     my-otr record 'series/heute/' 'heute show' @zdf '>7d' --max 2             # weekly, 2 at most
     my-otr record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1    # one evening
 
@@ -62,6 +62,17 @@ absolute, or below `LIBRARY_DIR`.
   nobody watches, mails through `FAIL_MAIL_CMD`. When every search fails, the
   first line says OTR was out of reach -- the network, or a firewall prompt
   nobody answered.
+- Before a download, refresh looks for the recording in the whole library
+  (`LIBRARY_DIR`, and every absolute record folder): any file whose name
+  carries OTR's `_YY.MM.DD_HH-MM_<channel>_<minutes>_TVOON_DE` -- the part a
+  renamed file keeps -- is that recording, wherever it was moved. And what
+  refresh fetched is noted in `<RECORDINGS_FILE>.fetched`, one name a line,
+  so one deleted after watching is not fetched again either. A recurring
+  line can therefore search a week back (`'>8d'`): a file OTR offers late,
+  or a night that failed, is still caught.
+- `refresh --since <DATE>` takes DATE as every line's from-date, for that run
+  only: a catch-up after a long gap (`--dry-run` first shows what it would
+  fetch).
 - A one-off more than `PAST_AFTER_DAYS` (7) after its last day is outdated: no
   longer searched, and named in each run -- "please check/remove". my-otr
   never removes a line itself.
@@ -110,16 +121,24 @@ Usage
       record <FOLDER> <TITLE> [<FILTER>..] [--max <N>]
                                       program a recording: FOLDER absolute, or below
                                       LIBRARY_DIR; TITLE and FILTERs as for search
-                                      ('>1d' recurring, @DATE or a range one-off);
+                                      ('>8d' recurring, @DATE or a range one-off);
                                       --max: at most N new ones a refresh. Shows what
                                       the search finds now, then adds the line
       list                            the recordings programmed (not OTR's: search
                                       finds those); an outdated one is marked
-      refresh [<TEXT>] [--dry-run]    each recording: search, then get the new ones
-                                      into its folder; TEXT: only lines holding it;
-                                      --dry-run: search only. One failing never stops
-                                      the others. A one-off PAST_AFTER_DAYS after its
-                                      last day is outdated: not searched, named
+      refresh [<TEXT>] [--since <DATE>] [--dry-run]
+                                      each recording: search, then get the new ones
+                                      into its folder -- new: no file anywhere below
+                                      LIBRARY_DIR carries OTR's slot (date, time,
+                                      channel, length -- kept by a renamed file),
+                                      and not in <RECORDINGS_FILE>.fetched, the
+                                      names refresh fetched (a deleted one too);
+                                      TEXT: only lines holding it; --since: DATE as
+                                      every line's from-date, this run only (a line
+                                      with its own @DATE keeps it); --dry-run: search
+                                      only. One failing never stops the others. A
+                                      one-off PAST_AFTER_DAYS after its last day is
+                                      outdated: not searched, named
       (bare)                          a short usage line and the state
       update-check <ZIP>              what a new release of OTR's decoder changed in
                                       the protocol my-otr speaks

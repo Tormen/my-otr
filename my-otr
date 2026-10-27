@@ -44,7 +44,7 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Callable, Dict, Final, Generator, List, Literal, NoReturn, Optional, Sequence, Tuple, cast
+from typing import IO, Callable, Dict, Final, Generator, List, Literal, NoReturn, Optional, Sequence, Set, Tuple, cast
 
 SCRIPT_NAME: Final = "my-otr"
 SCRIPT_VERSION: Final = "3.0"
@@ -1396,11 +1396,14 @@ RECORDINGS_HEAD: Final = """\
 ## record <FOLDER> <TITLE> [<FILTER>..] [--max <N>]
 ##   <FOLDER>  where the recordings go: absolute, or below LIBRARY_DIR; made when missing
 ##   <TITLE> <FILTER>..   what `my-otr search` takes: @channel, a weekday, a
-##             time, a duration, and the dates: '>1d' (since a day ago: a
-##             recurring one), @2026-11-03 (that day), '>2026-11-01' '<2026-11-07'
+##             time, a duration, and the dates: '>8d' (since 8 days ago: a
+##             recurring one -- refresh notes what it fetched in
+##             <RECORDINGS_FILE>.fetched, so a week back costs nothing and
+##             catches a file OTR offers late, or a night that failed),
+##             @2026-11-03 (that day), '>2026-11-01' '<2026-11-07'
 ##   --max <N> fetch at most N new ones per refresh (default: all)
 ## e.g. -- a show, every day it is on:
-##   record 'series.de/bares.fuer.rares/s0x/' 'bares fuer rares' @zdf '>1d' @15:05
+##   record 'series.de/bares.fuer.rares/s0x/' 'bares fuer rares' @zdf '>8d' @15:05
 ## a weekly show, at most 2 a run:
 ##   record 'series.de/heute.show/s0x/' 'heute show' @zdf '>7d' '>18h' '<23h' --max 2
 ## one evening:
@@ -1567,9 +1570,78 @@ def here_already(s: Settings, name: str, folder: Path) -> bool:
     return as_good_here(rec, rec.quality, folder, s.quality_cap) is not None
 
 
-def found_now(s: Settings, rec: Programmed) -> Optional[Tuple[int, List[str]]]:
+def library_slots(s: Settings, recs: Sequence["Programmed"]) -> Set[str]:
+    """The OTR slot of every finished file below LIBRARY_DIR and each absolute
+    record folder: a recording is in the library wherever it was moved and
+    whatever it was renamed to, as long as its name keeps OTR's slot."""
+    roots: Set[Path] = {Path(s.library_dir).expanduser()} if s.library_dir else set()
+    roots |= {r.folder for r in recs if r.folder_text.startswith("/")}
+    found: Set[str] = set()
+    for root in sorted(roots):
+        for _, _, files in os.walk(root):
+            unfinished_ = {f[:-len(".aria2")] for f in files if f.endswith(".aria2")}
+            found |= {m for f in files
+                      if not f.endswith((".aria2", ".my-otr.part")) and f not in unfinished_
+                      for m in (slot_mark(f),) if m}
+    return found
+
+
+_SLOT_MARK: Final = re.compile(r"_\d\d\.\d\d\.\d\d_\d\d-\d\d_[^_]+_\d+_tvoon_de", re.IGNORECASE)
+
+
+def slot_mark(name: str) -> str:
+    """OTR's slot in a name -- when, where, how long; "" when it has none. A
+    renamed file keeps it ("S01E02 - Show_26.10.02_20-15_zdf_45_TVOON_DE...")."""
+    m = _SLOT_MARK.search(name)
+    return m.group(0).lower() if m else ""
+
+
+def fetched_file(s: Settings) -> Path:
+    """The record of what refresh fetched, beside RECORDINGS_FILE: one name a
+    line -- OTR's, or any file name carrying its slot."""
+    return s.recordings_file.with_name(s.recordings_file.name + ".fetched")
+
+
+def fetched_before(s: Settings) -> Set[str]:
+    """The slots refresh fetched before: a recording moved out of its folder
+    since is not fetched again, so a line may search days back."""
+    try:
+        text = fetched_file(s).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    except OSError as e:
+        err("00073", f"cannot read {fetched_file(s)}: {e.strerror}")
+    return {m for m in map(slot_mark, text.splitlines()) if m}
+
+
+def note_fetched(s: Settings, names: Sequence[str], known: Set[str]) -> None:
+    """Add the names whose slot is not in the record yet, to the file and to
+    `known` -- the file rewritten whole, so an interrupt never tears it."""
+    new = [n for n in names if slot_mark(n) not in known]
+    if not new:
+        return
+    p = fetched_file(s)
+    try:
+        old = p.read_text(encoding="utf-8") if p.exists() else ""
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(old + "".join(n + "\n" for n in new), encoding="utf-8")
+        tmp.replace(p)
+    except OSError as e:
+        err("00074", f"cannot write {p}: {e.strerror} -- what was fetched would be fetched again")
+    known.update(slot_mark(n) for n in new)
+
+
+def since_words(words: Sequence[str], since: datetime.date) -> Tuple[str, ...]:
+    """A line's search with SINCE as its from-date, for one run; a line that
+    names its own day (@DATE) keeps it."""
+    if any(re.fullmatch(r"@\d{4}-\d\d-\d\d", w) for w in words):
+        return tuple(words)
+    return (*(w for w in words if not re.fullmatch(r">(?:\d{1,3}d|\d{4}-\d\d-\d\d)", w)), f">{since}")
+
+
+def found_now(s: Settings, rec: Programmed, words: Sequence[str]) -> Optional[Tuple[int, List[str]]]:
     """The search of one recording, as a child; (rc, names) or None on a timeout."""
-    res = run_child([*_child, *child_options(s), "search", *rec.words], s.search_timeout,
+    res = run_child([*_child, *child_options(s), "search", *words], s.search_timeout,
                     rec.folder if rec.folder.is_dir() else Path.home(), capture=True)
     if res is None:
         return None
@@ -1597,7 +1669,7 @@ def mail_failure(s: Settings, text: str) -> None:
 
 def cmd_test_mail(s: Settings) -> int:
     if not s.fail_mail_cmd:
-        err("00073", "--test-mail: FAIL_MAIL_CMD is not set -- no failure mail would go out")
+        err("00075", "--test-mail: FAIL_MAIL_CMD is not set -- no failure mail would go out")
     host = socket.gethostname().split(".")[0]
     rc = subprocess.run([*s.fail_mail_cmd, f"{SCRIPT_NAME}: test mail from {host}",
                          f"Test mail: a failed {SCRIPT_NAME} refresh is mailed through this same path.\n\n"
@@ -1605,7 +1677,7 @@ def cmd_test_mail(s: Settings) -> int:
                          f"config: {' + '.join(str(p) for p in s.files) or 'none'}\nsent:   {shlex.join(s.fail_mail_cmd)}"],
                         stdin=subprocess.DEVNULL).returncode
     if rc != 0:
-        err("00074", f"--test-mail: test mail NOT sent [rc {rc}]: {shlex.join(s.fail_mail_cmd)}")
+        err("00076", f"--test-mail: test mail NOT sent [rc {rc}]: {shlex.join(s.fail_mail_cmd)}")
     OUT.msg(f" >>> test mail sent through {shlex.join(s.fail_mail_cmd)} [rc 0]")
     return 0
 
@@ -1614,20 +1686,36 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
     """Each programmed recording: search, then get the new ones into its
     folder. One failing never stops the others; the run fails at the end."""
     dry = "--dry-run" in args
-    texts = [a for a in args if a != "--dry-run"]
+    since: Optional[datetime.date] = None
+    texts: List[str] = []
+    it = iter(a for a in args if a != "--dry-run")
+    for a in it:
+        key, eq, val = a.partition("=")
+        if key != "--since":
+            texts.append(a)
+            continue
+        v = val if eq else next(it, "")
+        try:
+            since = datetime.date.fromisoformat(v)
+        except ValueError:
+            err("00077", f"--since '{v}' -- a date, YYYY-MM-DD")
     if len(texts) > 1:
-        err("00075", "refresh [<TEXT>] [--dry-run] -- one TEXT at most (a part of the `record` line)")
+        err("00078", "refresh [<TEXT>] [--since <DATE>] [--dry-run] -- one TEXT at most (a part of the `record` line)")
     text = texts[0] if texts else None
     recs = read_recordings(s)
     if not recs:
-        err("00076", f"no recordings in {s.recordings_file} -- `{SCRIPT_NAME} record ...` adds one")
+        err("00079", f"no recordings in {s.recordings_file} -- `{SCRIPT_NAME} record ...` adds one")
     chosen = [r for r in recs if text is None or text in r.line()]
     if not chosen:
-        err("00077", f"no recording holds '{text}' -- `{SCRIPT_NAME} list` shows them")
+        err("00080", f"no recording holds '{text}' -- `{SCRIPT_NAME} list` shows them")
     with recordings_lock(s):
         today = datetime.date.today()
         failures: List[str] = []
         searched = failed_searches = done = 0
+        known = fetched_before(s)
+        phase("looking through the library")
+        library = library_slots(s, chosen)
+        OUT.det(f"    > the library holds {len(library)} OTR recording(s)")
         for rec in chosen:
             if rec.outdated(s, today):
                 OUT.warn(f"outdated line (last day {rec.last_day}): {rec.search} -- please check/remove ({rec.where})")
@@ -1639,7 +1727,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
             done += 1
             phase(f"refreshing {rec.search}")
             searched += 1
-            found = found_now(s, rec)
+            found = found_now(s, rec, since_words(rec.words, since) if since else rec.words)
             if found is None or found[0] != 0:
                 failed_searches += 1
                 why = (f"the search gave no answer within SEARCH_TIMEOUT={s.search_timeout}s -- killed"
@@ -1648,10 +1736,16 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                 OUT.warn(f"{rec.search}: {why}")
                 continue
             here = [n for n in found[1] if here_already(s, n, rec.folder)]
-            new = [n for n in found[1] if n not in here]
+            stored = [n for n in found[1] if n not in here and slot_mark(n) in library]
+            before = [n for n in found[1] if n not in here and n not in stored and slot_mark(n) in known]
+            new = [n for n in found[1] if n not in here and n not in stored and n not in before]
             names = new[:rec.max] if rec.max else new
             of = (f"{len(found[1])} found" + (f", {len(here)} here already" if here else "")
+                  + (f", {len(stored)} in the library" if stored else "")
+                  + (f", {len(before)} fetched before" if before else "")
                   + (f", max {rec.max}" if rec.max else ""))
+            if not dry:
+                note_fetched(s, here, known)
             if not names:
                 OUT.msg(f" >>> {rec.search}: nothing new [{of}]")
                 continue
@@ -1666,6 +1760,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                 failures.append(f"  {rec.search}: cannot make {rec.folder}: {e.strerror}")
                 continue
             got = run_child([*_child, *child_options(s), "get"], s.get_timeout, rec.folder, "\n".join(names) + "\n")
+            note_fetched(s, [n for n in names if here_already(s, n, rec.folder)], known)   # failed or not
             if got is None or got[0] != 0:
                 why = (f"the get was not done within GET_TIMEOUT={s.get_timeout}s -- killed"
                        if got is None else f"the get failed [rc {got[0]}]")
@@ -1691,7 +1786,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                     if searched > 1 and failed_searches == searched else "")
             text_ = f"{len(failures)} of {done} recording(s) failed:{head}\n" + "\n".join(failures)
             mail_failure(s, text_)
-            err("00078", text_)
+            err("00081", text_)
     return 0
 
 
@@ -1703,11 +1798,11 @@ def cmd_record(s: Settings, args: Sequence[str]) -> int:
         if any(r.line() == line for r in read_recordings(s)):
             OUT.msg(f" >>> already programmed: {line}")
             return 0
-        found = found_now(s, rec)
+        found = found_now(s, rec, rec.words)
         if found is None:
             OUT.warn(f"the search gave no answer within SEARCH_TIMEOUT={s.search_timeout}s -- recorded anyway")
         elif found[0] != 0:
-            err("00079", f"the search failed [rc {found[0]}] -- nothing recorded: {rec.search}")
+            err("00082", f"the search failed [rc {found[0]}] -- nothing recorded: {rec.search}")
         elif found[1]:
             OUT.msg(f" >>> found {len(found[1])} now:")
             for n in found[1]:
@@ -1825,18 +1920,18 @@ _geteuid: Callable[[], int] = os.geteuid
 def check_install(s: Settings) -> None:
     """What --install refuses, before root is even asked for."""
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s.run_at):
-        err("00080", f"RUN_AT=\"{s.run_at}\" -- HH:MM")
+        err("00083", f"RUN_AT=\"{s.run_at}\" -- HH:MM")
     if s.run_at.startswith("02:"):
-        err("00081", f"RUN_AT=\"{s.run_at}\": launchd fires a time between 02:00 and 02:59 twice on the night "
+        err("00084", f"RUN_AT=\"{s.run_at}\": launchd fires a time between 02:00 and 02:59 twice on the night "
                      "the clocks go back -- choose one outside it")
     if not s.run_as:
-        err("00082", "RUN_AS is not set -- who does the nightly refresh run as?")
+        err("00085", "RUN_AS is not set -- who does the nightly refresh run as?")
     try:
         pwd.getpwnam(s.run_as)
     except KeyError:
-        err("00083", f"RUN_AS=\"{s.run_as}\": no such user here")
+        err("00086", f"RUN_AS=\"{s.run_as}\": no such user here")
     if s.fda_launcher and not os.access(s.fda_launcher, os.X_OK):
-        err("00084", f"FDA_LAUNCHER \"{s.fda_launcher}\" is not there, or not executable")
+        err("00087", f"FDA_LAUNCHER \"{s.fda_launcher}\" is not there, or not executable")
 
 
 def cmd_install(s: Settings, remove: bool) -> int:
@@ -1844,11 +1939,11 @@ def cmd_install(s: Settings, remove: bool) -> int:
     if not remove:
         check_install(s)
     if _geteuid() != 0:
-        err("00085", f"needs root -- as root: {SCRIPT_NAME} --{'uninstall' if remove else 'install'}")
+        err("00088", f"needs root -- as root: {SCRIPT_NAME} --{'uninstall' if remove else 'install'}")
     target = f"system/{s.launchd_label}"
     if remove:
         if not p.exists():
-            err("00086", f"--uninstall: {p} is not there -- nothing installed")
+            err("00089", f"--uninstall: {p} is not there -- nothing installed")
         subprocess.run(["launchctl", "bootout", target], stdin=subprocess.DEVNULL)
         p.unlink()
         OUT.msg(f" >>> removed {p} (and the job from launchd)")
@@ -1858,7 +1953,7 @@ def cmd_install(s: Settings, remove: bool) -> int:
     try:
         new.write_text(plist_content(s, program), encoding="utf-8")
         if subprocess.run(["plutil", "-lint", "-s", str(new)]).returncode != 0:
-            err("00087", "--install: the plist written does not lint -- nothing installed")
+            err("00090", "--install: the plist written does not lint -- nothing installed")
         os.chmod(new, 0o644)
         with contextlib.suppress(OSError):
             Path(s.launchd_log).parent.mkdir(parents=True, exist_ok=True)
@@ -1868,7 +1963,7 @@ def cmd_install(s: Settings, remove: bool) -> int:
         with contextlib.suppress(OSError):
             new.unlink()
     if subprocess.run(["launchctl", "bootstrap", "system", str(p)]).returncode != 0:
-        err("00088", f"--install: launchctl bootstrap failed for {p}")
+        err("00091", f"--install: launchctl bootstrap failed for {p}")
     how = f"through {s.fda_launcher} (it drops to its own user)" if s.fda_launcher else f"as {s.run_as}"
     OUT.msg(f" >>> installed {p}: `{SCRIPT_NAME} -Q refresh` daily at {s.run_at}, {how}; its output: {s.launchd_log}")
     return 0
@@ -1926,16 +2021,24 @@ PROGRAMMED RECORDINGS -- RECORDINGS_FILE, one `record` line each
   record <FOLDER> <TITLE> [<FILTER>..] [--max <N>]
                                   program a recording: FOLDER absolute, or below
                                   LIBRARY_DIR; TITLE and FILTERs as for search
-                                  ('>1d' recurring, @DATE or a range one-off);
+                                  ('>8d' recurring, @DATE or a range one-off);
                                   --max: at most N new ones a refresh. Shows what
                                   the search finds now, then adds the line
   list                            the recordings programmed (not OTR's: search
                                   finds those); an outdated one is marked
-  refresh [<TEXT>] [--dry-run]    each recording: search, then get the new ones
-                                  into its folder; TEXT: only lines holding it;
-                                  --dry-run: search only. One failing never stops
-                                  the others. A one-off PAST_AFTER_DAYS after its
-                                  last day is outdated: not searched, named
+  refresh [<TEXT>] [--since <DATE>] [--dry-run]
+                                  each recording: search, then get the new ones
+                                  into its folder -- new: no file anywhere below
+                                  LIBRARY_DIR carries OTR's slot (date, time,
+                                  channel, length -- kept by a renamed file),
+                                  and not in <RECORDINGS_FILE>.fetched, the
+                                  names refresh fetched (a deleted one too);
+                                  TEXT: only lines holding it; --since: DATE as
+                                  every line's from-date, this run only (a line
+                                  with its own @DATE keeps it); --dry-run: search
+                                  only. One failing never stops the others. A
+                                  one-off PAST_AFTER_DAYS after its last day is
+                                  outdated: not searched, named
   (bare)                          a short usage line and the state
   update-check <ZIP>              what a new release of OTR's decoder changed in
                                   the protocol my-otr speaks
@@ -2002,7 +2105,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
             if c.command is None:
                 if a not in COMMANDS:
                     hint = f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else ""
-                    err("00089", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
+                    err("00092", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
                 c.command = COMMANDS[a]
             else:
                 c.args.append(a)
@@ -2025,18 +2128,18 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif key in ("--log-file", "--config"):
             v = val if eq else next(it, None)
             if not v:
-                err("00090", f"{key} needs a <FILE>")
+                err("00093", f"{key} needs a <FILE>")
             if key == "--config":
                 c.config = v
             else:
                 c.log_file, c.log = v, True
         elif a == "--no-decode":
             c.no_decode = True
-        elif a in ("--dry-run",) or key == "--max":
-            if c.command not in ("refresh", "record"):
-                err("00091", f"{key} goes with {'refresh' if key == '--dry-run' else 'record'}")
+        elif a in ("--dry-run",) or key in ("--max", "--since"):
+            if c.command not in ("refresh", "record") or (key == "--since" and c.command != "refresh"):
+                err("00094", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
             c.args.append(a)
-            if key == "--max" and not eq:
+            if key in ("--max", "--since") and not eq:
                 c.args.append(next(it, ""))
         elif a in ("--install", "--uninstall", "--test-mail"):
             c.command = a[2:]
@@ -2045,9 +2148,9 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         else:
             verb = a.lstrip("-")
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
-            err("00092", f"no such option '{a}'{hint}")
+            err("00095", f"no such option '{a}'{hint}")
     if c.no_decode and c.command != "get":
-        err("00093", "--no-decode goes with 'get'")
+        err("00096", "--no-decode goes with 'get'")
     return c
 
 
@@ -2061,7 +2164,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00094", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00097", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -2074,7 +2177,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00095", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00098", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -2096,7 +2199,7 @@ def run(argv: Sequence[str]) -> int:
         return cmd_state(argv, c.config)
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00096", "update-check needs the <ZIP> of OTR's decoder")
+            err("00099", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -2116,7 +2219,7 @@ def run(argv: Sequence[str]) -> int:
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00097", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00100", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
@@ -2143,7 +2246,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00098 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00101 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -2151,7 +2254,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00099 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00102 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -2554,7 +2657,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00095" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00098" in errs, "never over an existing file")
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
             f"the defaults parse cleanly, and an empty credential is named: {errs}")
@@ -2649,7 +2752,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00099 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00102 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()
@@ -2705,9 +2808,12 @@ if verb == "search":
     for k in range(n):
         print(f"{{title.replace(' ', '_')}}_{{k}}_26.10.0{{k + 1}}_20-15_zdf_45_TVOON_DE.HQ.otr2")
 elif verb == "get":
+    creates = os.path.exists(os.path.join(os.path.dirname(calls), "get.creates"))
     with open(calls, "a") as f:
         for line in sys.stdin:
             f.write("got " + line.strip() + " @" + os.getcwd() + "\\n")
+            if creates and "three_1" not in line:     # three_1: a download that fails
+                open(line.strip(), "w").close()
 """
 
 
@@ -2819,6 +2925,66 @@ def t_refresh_here(t: T) -> None:
             f"all here: nothing new, and no get at all: {errs}")
 
 
+def t_refresh_fetched(t: T) -> None:
+    calls = _t_child(t)
+    conf = _t_rec_config(t, "record a/ 'alpha three'\n")
+    (t.dir / "get.creates").write_text("")
+    folder = t.dir / "lib" / "a"
+
+    def moved_away() -> None:
+        for p in folder.iterdir():
+            p.unlink()
+        calls.unlink()
+
+    rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    noted = [n[:13] for n in _t_lines(t.dir / "rec.fetched")]
+    t.check(rc == 0 and noted == ["alpha_three_0", "alpha_three_2"],
+            f"what arrived is noted, the failed one is not: {noted} {errs}")
+    moved_away()
+    rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    got = [c.split()[1][:13] for c in _t_lines(calls) if c.startswith("got ")]
+    t.check(rc == 0 and got == ["alpha_three_1"], f"moved away, never fetched again; the failed one is retried: {got}")
+    t.check("fetched 1 [3 found, 2 fetched before, rc 0]" in errs, errs)
+    with (t.dir / "rec.fetched").open("a", encoding="utf-8") as f:
+        f.write("S01E02 - alpha_three_1_26.10.02_20-15_ZDF_45_TVOON_DE.mpg.HQ [vu@2026-10-20].avi\n")
+    moved_away()
+    rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    t.check(rc == 0 and "nothing new [3 found, 3 fetched before]" in errs,
+            f"a renamed file's name in the record counts as fetched: {errs}")
+    t.check(not any(c.startswith("got ") for c in _t_lines(calls)), f"no get: {_t_lines(calls)}")
+
+
+def t_refresh_library(t: T) -> None:
+    calls = _t_child(t)
+    conf = _t_rec_config(t, "record a/ 'alpha three'\n")
+    moved = t.dir / "lib" / "b" / "s01"
+    moved.mkdir(parents=True)
+    (moved / "S01E01 - alpha_three_0_26.10.01_20-15_ZDF_45_TVOON_DE.mpg.HQ [vu@2026-10-20].avi").write_bytes(b"x")
+    half = t.dir / "lib" / "a" / "alpha_three_2_26.10.03_20-15_zdf_45_TVOON_DE.HQ.otr2"
+    half.parent.mkdir(parents=True)
+    half.write_bytes(b"x")
+    half.with_name(half.name + ".aria2").write_bytes(b"x")
+    rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    got = [c.split()[1][:13] for c in _t_lines(calls) if c.startswith("got ")]
+    t.check(rc == 0 and got == ["alpha_three_1", "alpha_three_2"],
+            f"one moved and renamed elsewhere in the library is skipped; an unfinished one is not: {got} {errs}")
+    t.check("fetched 2 [3 found, 1 in the library, rc 0]" in errs, errs)
+
+
+def t_refresh_since(t: T) -> None:
+    calls = _t_child(t)
+    conf = _t_rec_config(t, "record a/ 'alpha one' @zdf '>1d' --max 1\nrecord b/ 'beta one' @2099-01-01\n")
+    rc, _, errs = t.run(["--config", str(conf), "refresh", "--since", "2026-08-01", "--dry-run"])
+    searches = [c for c in _t_lines(calls) if c.startswith("search ")]
+    t.check(rc == 0 and len(searches) == 2 and searches[0].startswith("search alpha one @zdf >2026-08-01 @"),
+            f"--since replaces the line's own from-date, for this run: {searches} {errs}")
+    t.check(len(searches) == 2 and searches[1].startswith("search beta one @2099-01-01 @"),
+            f"a line with its own @DATE is left alone: {searches}")
+    t.check("'>1d'" in (t.dir / "rec").read_text(), "the line itself is not changed")
+    rc, _, errs = t.run(["--config", str(conf), "refresh", "--since", "2026-13-01"])
+    t.check(rc == 1 and "--since '2026-13-01'" in errs, f"a wrong date is refused: {errs}")
+
+
 def t_refresh_timeout(t: T) -> None:
     _t_child(t)
     conf = _t_rec_config(t, "record a/ 'alpha hang'\nrecord d/ 'delta one'\n", 'SEARCH_TIMEOUT="2"\n')
@@ -2918,7 +3084,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_get_name_forms, t_get_downloads_off_argv, t_get_duplicates, t_decode_otr2, t_decode_otr2_wrong_checksum,
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
     t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
-    t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_timeout, t_refresh_all_failed,
+    t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_fetched, t_refresh_library, t_refresh_since, t_refresh_timeout, t_refresh_all_failed,
     t_refresh_outdated, t_refresh_lock, t_state, t_install, t_test_mail,
 ]
 
