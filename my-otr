@@ -913,6 +913,13 @@ def download_link(s: Settings, name: str) -> str:
     return m.group(1)
 
 
+# aria2c's console goes into the record, not onto a screen: no progress
+# readout, no colour codes, no results table -- warnings and errors only.
+# First, so OTR_DL_CMD_PARAMS can still override any of them.
+ARIA2C_QUIET: Final = ("--console-log-level=warn", "--summary-interval=0", "--show-console-readout=false",
+                       "--download-result=hide", "--enable-color=false")
+
+
 def aria2c(s: Settings, url: str, name: str, folder: Path) -> None:
     """Download `url` as `name` into `folder`. The URL may carry a token, so it
     goes to the downloader on stdin, never on its command line."""
@@ -920,7 +927,7 @@ def aria2c(s: Settings, url: str, name: str, folder: Path) -> None:
     exe = shutil.which(s.dl_cmd)
     if exe is None:
         err("00036", f"OTR_DL_CMD '{s.dl_cmd}' not found")
-    cmd = [exe, *s.dl_params, "--input-file=-"]
+    cmd = [exe, *ARIA2C_QUIET, *s.dl_params, "--input-file=-"]
     OUT.det(f" >>> {shlex.join(cmd)}   (stdin: the URL, out={name})")
     # its output goes into the record, under this download (#57)
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2350,7 +2357,11 @@ def t_get_downloads_off_argv(t: T) -> None:
     t.check((t.dir / n).is_file(), "the file is there")
     argv = (t.dir / "aria2c.argv").read_text()
     stdin = (t.dir / "aria2c.stdin").read_text()
-    t.check("Tok" not in argv and argv.split() == ["-c", "--input-file=-"], f"aria2c's argv: no URL: {argv}")
+    t.check("Tok" not in argv and argv.split()[-2:] == ["-c", "--input-file=-"],
+            f"aria2c's argv: no URL; OTR_DL_CMD_PARAMS last, so they override: {argv}")
+    t.check({"--show-console-readout=false", "--enable-color=false", "--console-log-level=warn",
+             "--download-result=hide"} <= set(argv.split()),
+            f"no progress readout, no colour codes, no NOTICE lines, no results table in the record: {argv}")
     t.check(f"/f/{n}?token=Tok" in stdin and f"out={n}" in stdin, f"URL and name on its stdin: {stdin}")
     t.no_secret(out + errs + argv, "get's output and aria2c's argv")
     login = [b for _, u, b in t.requests if u.endswith("/index.php")]
