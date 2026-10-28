@@ -256,7 +256,9 @@ DEFAULT_DECODE_OUTP_DIR=""
 COOKIE_FILE="$HOME/.my-otr.cookies"
 
 ## --- refresh: the programmed recordings, fetched nightly ----------------
-## the `record` lines (my-otr record adds them; my-otr list shows them)
+## the `record` lines (my-otr record adds them; my-otr list shows them) -- a
+## file of their own, not lines in this config: the config under /LINKS/default
+## is root's, while `record` runs as you and must be able to write its lines
 RECORDINGS_FILE="$HOME/.my-otr.recordings"
 ## where a relative <FOLDER> of a `record` line lies ("": only absolute ones)
 LIBRARY_DIR=""
