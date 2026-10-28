@@ -48,7 +48,9 @@ Programmed recordings
 as `search`, shows what the search finds now, and adds one `record` line to
 `RECORDINGS_FILE` (default `~/.my-otr.recordings`; an editor is as good -- the
 file explains itself), the folder and the title always in `''`. FOLDER is
-absolute, or below `LIBRARY_DIR`.
+absolute, or below `LIBRARY_DIR`. The lines are a file of their own, not part
+of the config: the config under `/LINKS/default` is root's, while `record` runs
+as you and must be able to write them.
 
 The recordings are a file of their own, not lines in the config: the config
 under `/LINKS/default` is root's, while `record` runs as you and must be able
