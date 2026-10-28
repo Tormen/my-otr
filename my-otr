@@ -3070,7 +3070,8 @@ def t_install(t: T) -> None:
     s = load_settings(str(_t_rec_config(t, "", f'RUN_AS="{me}"\nRUN_AT="03:31"\nLAUNCHD_LOG="/var/log/x.log"\n')))
     plain = plist_content(s, "/usr/local/bin/my-otr")
     third = plain.splitlines()[2]
-    t.check(third.startswith(f"<!-- installed by {SCRIPT_NAME} --install ({me}) on ")
+    who = pwd.getpwuid(os.geteuid()).pw_name     # the comment's source -- getuser() reads $USER, which may differ
+    t.check(third.startswith(f"<!-- installed by {SCRIPT_NAME} --install ({who}) on ")
             and f": generated, build {build_id()} -->" in third,
             f"the plist names who installed it, right after the DOCTYPE: {third}")
     t.check("<string>/usr/local/bin/my-otr</string>" in plain and f"<string>{me}</string>" in plain
