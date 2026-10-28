@@ -290,6 +290,12 @@ LAUNCHD_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 ## a launcher that runs my-otr (with Full Disk Access, e.g. built by my-fda);
 ## "": launchd runs my-otr itself, as RUN_AS
 FDA_LAUNCHER=""
+## the program that writes Little Snitch rules (macOS): nobody is at the
+## screen to answer an alert for the job, so --install allows, owned by
+## RUN_AS, any program via the Python that runs my-otr to OTR's domains
+## (datenkeller.net, onlinetvrecorder.com), and via OTR_DL_CMD to any host,
+## all on tcp 443 -- the downloads on 80 too. "": writes none
+LITTLE_SNITCH="/LINKS/sbin/my-little-snitch"
 '''
 
 
@@ -328,6 +334,7 @@ class Settings:
     launchd_log: str
     launchd_path: str
     fda_launcher: str
+    little_snitch: str
 
     def secret(self, key: str) -> str:
         """A credential the command needs: refused when the config left it empty."""
@@ -506,7 +513,8 @@ def load_settings(override: Optional[str]) -> Settings:
         fail_mail_cmd=_words(names["FAIL_MAIL_CMD"], "FAIL_MAIL_CMD", where),
         run_after_refresh=_words(names["RUN_AFTER_REFRESH"], "RUN_AFTER_REFRESH", where),
         run_as=names["RUN_AS"], run_at=names["RUN_AT"], launchd_label=names["LAUNCHD_LABEL"],
-        launchd_log=names["LAUNCHD_LOG"], launchd_path=names["LAUNCHD_PATH"], fda_launcher=names["FDA_LAUNCHER"])
+        launchd_log=names["LAUNCHD_LOG"], launchd_path=names["LAUNCHD_PATH"], fda_launcher=names["FDA_LAUNCHER"],
+        little_snitch=names["LITTLE_SNITCH"])
 
 
 # --- 3. recordings: names, qualities, the search filter --------------------
@@ -1878,6 +1886,14 @@ def cmd_state(argv: Sequence[str], config: Optional[str]) -> int:
     how = f"through {s.fda_launcher}" if s.fda_launcher else "my-otr itself"
     OUT.result(f" >>> nightly: installed, {s.run_at} as {s.run_as or '?'}, {how} [{p}]" if p.exists()
                else f" >>> nightly: not installed ('{SCRIPT_NAME} --install', root)")
+    if s.little_snitch and s.run_as and os.access(s.little_snitch, os.X_OK):
+        try:
+            rules, missing = snitch_check(s)
+            OUT.result(snitch_summary(s, rules, missing))
+            for x in missing:
+                OUT.result(f"    > missing: {x.shown(s.run_as)}")
+        except OtrError as e:
+            OUT.result(f" >>> Little Snitch: not readable -- {e.text}")
     OUT.result(f" >>> last run: {last_refresh(s)}")
     return 0
 
@@ -1962,6 +1978,8 @@ def cmd_install(s: Settings, remove: bool) -> int:
         p.unlink()
         OUT.msg(f" >>> removed {p} (and the job from launchd)")
         return 0
+    if s.little_snitch:
+        snitch_install(s)
     program = os.path.abspath(sys.argv[0])
     new = p.with_name(f".{p.name}.{os.getpid()}.new")
     try:
@@ -1981,6 +1999,111 @@ def cmd_install(s: Settings, remove: bool) -> int:
     how = f"through {s.fda_launcher} (it drops to its own user)" if s.fda_launcher else f"as {s.run_as}"
     OUT.msg(f" >>> installed {p}: `{SCRIPT_NAME} -Q refresh` daily at {s.run_at}, {how}; its output: {s.launchd_log}")
     return 0
+
+
+@dataclass(frozen=True)
+class SnitchRule:
+    """One Little Snitch rule the nightly job needs: any program via VIA to
+    REMOTE (a domain and its hosts, or any host) on tcp/PORT, owned by RUN_AS.
+    Any program, because Little Snitch names whatever sits at the top of the
+    tree -- my-otr, or the FDA launcher in front of it -- and never the same
+    path twice when the copy moves."""
+
+    via: str
+    remote: str
+    port: int
+
+    def shown(self, owner: str) -> str:
+        return f"any via {self.via} -> {self.remote}, tcp/{self.port}, owner {owner}"
+
+
+def _job_venv_default(user: str) -> Path:
+    return Path(pwd.getpwnam(user).pw_dir) / ".python.venv" / SCRIPT_NAME
+
+
+_job_venv: Callable[[str], Path] = _job_venv_default
+
+
+def job_python(s: Settings) -> str:
+    """The Python the job's my-otr runs in: RUN_AS's venv (kept on its Python
+    across an upgrade until that one is gone), else the python3 the job's
+    PATH finds, which builds it."""
+    with contextlib.suppress(KeyError):
+        venv = _job_venv(s.run_as) / "bin" / "python3"
+        if venv.exists():
+            return str(venv)
+    return shutil.which("python3", path=s.launchd_path) or "python3"
+
+
+def snitch_rules(s: Settings) -> List[SnitchRule]:
+    """The rules: the Python to OTR's domains -- each host's last two labels,
+    from the URLs my-otr calls -- and the downloader to whatever mirror
+    datenkeller answers with."""
+    domains = sorted({".".join((urllib.parse.urlsplit(u).hostname or "").split(".")[-2:])
+                      for u in (DK_SITE, OTR_API, OTR_KEYS, OTR_QUELLE)})
+    py = job_python(s)
+    dl = shutil.which(s.dl_cmd, path=s.launchd_path) or s.dl_cmd
+    return [SnitchRule(py, d, 443) for d in domains] + [SnitchRule(dl, "any", p) for p in (443, 80)]
+
+
+def snitch_program(program: str) -> str:
+    """The end of the path Little Snitch names for PROGRAM: a framework Python
+    connects as its Python.app, anything else as itself."""
+    real = os.path.realpath(program)
+    m = re.match(r".*(/Python\.framework/Versions/[^/]+)/bin/python[0-9.]*$", real)
+    return m.group(1) + "/Resources/Python.app/Contents/MacOS/Python" if m else "/" + os.path.basename(real)
+
+
+def snitch_check(s: Settings) -> Tuple[List[SnitchRule], List[SnitchRule]]:
+    """The rules, and those `LITTLE_SNITCH list` lacks. Only the exact shape
+    counts: a rule for one script, another Python version, another owner or
+    port misses the job."""
+    rules = snitch_rules(s)
+    try:
+        r = subprocess.run([s.little_snitch, "list"], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        err("00092", f"{s.little_snitch} list: {e}")
+    if r.returncode != 0:
+        last = (r.stderr.strip().splitlines() or ["no message"])[-1]
+        err("00093", f"{s.little_snitch} list [{r.returncode}]: {last}")
+    lines = r.stdout.splitlines()
+
+    def there(x: SnitchRule) -> bool:
+        want = re.compile(r"\tany via \S*" + re.escape(snitch_program(x.via)) + "  allow  " + re.escape(x.remote)
+                          + f"  tcp/{x.port}  " + re.escape(s.run_as) + r"( |$)")
+        return any(want.search(ln) for ln in lines)
+
+    return rules, [x for x in rules if not there(x)]
+
+
+def snitch_summary(s: Settings, rules: Sequence[SnitchRule], missing: Sequence[SnitchRule]) -> str:
+    if not missing:
+        return f" >>> Little Snitch: {len(rules)}/{len(rules)} rule(s) in place"
+    return f" >>> Little Snitch: {len(missing)} of {len(rules)} rule(s) MISSING -- '{SCRIPT_NAME} --install' (root) writes them"
+
+
+def snitch_install(s: Settings) -> None:
+    """Each rule's state, and the missing ones written -- the job has nobody
+    to answer an alert. Without the program (not a Mac with Little Snitch)
+    it says so and writes none."""
+    if not os.access(s.little_snitch, os.X_OK):
+        OUT.msg(f" >>> Little Snitch: LITTLE_SNITCH \"{s.little_snitch}\" is not there -- no rules written")
+        return
+    rules, missing = snitch_check(s)
+    for x in rules:
+        OUT.msg(f"    > {x.shown(s.run_as)}: {'missing' if x in missing else 'in place'}")
+    for x in missing:
+        argv = [s.little_snitch, "allow", "go", "any", x.remote, "--port", str(x.port), "--via", x.via, "--owner", s.run_as]
+        if subprocess.run(argv, stdin=subprocess.DEVNULL).returncode != 0:
+            err("00094", f"the Little Snitch rule {x.shown(s.run_as)} was not written")
+    if missing:
+        rules, still = snitch_check(s)
+        if still:
+            err("00095", f"written, but {s.little_snitch} list does not show: {still[0].shown(s.run_as)}")
+        OUT.msg(f" >>> Little Snitch: {len(missing)} rule(s) written, {len(rules) - len(missing)} were in place")
+    else:
+        OUT.msg(snitch_summary(s, rules, missing) + " -- nothing to write")
 
 
 def build_id() -> str:
@@ -2078,7 +2201,9 @@ OPTIONS
   --create-config [<FILE>] the default config, to stdout or into a new FILE
   --install / --uninstall  the nightly refresh as a LaunchDaemon (root): RUN_AS,
                            RUN_AT, LAUNCHD_LABEL, LAUNCHD_LOG, LAUNCHD_PATH,
-                           FDA_LAUNCHER (a launcher that runs my-otr)
+                           FDA_LAUNCHER (a launcher that runs my-otr); first it
+                           writes the Little Snitch rules the job needs and lacks
+                           (LITTLE_SNITCH) -- bare my-otr shows if any is missing
   --test-mail              one mail through FAIL_MAIL_CMD, the failure mail's path
   --run-tests [<FILTER>]   the built-in tests (TAP) -- all, or those whose name holds FILTER
   --version                the exact build
@@ -2127,7 +2252,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
                 if a not in COMMANDS:
                     hint = (f" -- you mean `{SCRIPT_NAME} {GONE[a]}`" if a in GONE
                             else f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else "")
-                    err("00092", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
+                    err("00096", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
                 c.command = COMMANDS[a]
             else:
                 c.args.append(a)
@@ -2150,14 +2275,14 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif key in ("--log-file", "--config"):
             v = val if eq else next(it, None)
             if not v:
-                err("00093", f"{key} needs a <FILE>")
+                err("00097", f"{key} needs a <FILE>")
             if key == "--config":
                 c.config = v
             else:
                 c.log_file, c.log = v, True
         elif a in ("--dry-run",) or key in ("--max", "--since"):
             if c.command not in ("refresh", "record") or (key == "--since" and c.command != "refresh"):
-                err("00094", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
+                err("00098", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
             c.args.append(a)
             if key in ("--max", "--since") and not eq:
                 c.args.append(next(it, ""))
@@ -2168,7 +2293,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         else:
             verb = GONE.get(a, a.lstrip("-"))
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
-            err("00095", f"no such option '{a}'{hint}")
+            err("00099", f"no such option '{a}'{hint}")
     return c
 
 
@@ -2182,7 +2307,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00096", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00100", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -2195,7 +2320,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00097", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00101", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -2217,7 +2342,7 @@ def run(argv: Sequence[str]) -> int:
         return cmd_state(argv, c.config)
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00098", "update-check needs the <ZIP> of OTR's decoder")
+            err("00102", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -2237,7 +2362,7 @@ def run(argv: Sequence[str]) -> int:
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00099", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00103", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
@@ -2264,7 +2389,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00100 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00104 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -2272,7 +2397,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00101 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00105 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -2317,6 +2442,7 @@ class T:
         p.write_text(f'DATENKELLER_LOGIN="tester"\nDATENKELLER_PASSW="{T_PASSW}"\nDATENKELLER_APIKEY="{T_KEY}"\n'
                      f'OTR_LOGIN="tester@x"\nOTR_PASSW="{T_OTR_PASSW}"\nLOG=""\n'
                      f'COOKIE_FILE="{self.dir}/cookies"\nOTR_DL_CMD="{self.dir}/aria2c"\nOTR_DL_CMD_PARAMS="-c"\n'
+                     'LITTLE_SNITCH=""\n'
                      + extra, encoding="utf-8")
         return p
 
@@ -2676,7 +2802,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00097" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00101" in errs, "never over an existing file")
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
             f"the defaults parse cleanly, and an empty credential is named: {errs}")
@@ -2772,7 +2898,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00101 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00105 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()
@@ -3095,6 +3221,76 @@ def t_install(t: T) -> None:
     t.check(rc == 1 and "needs root" in errs, errs)
 
 
+def t_install_snitch(t: T) -> None:
+    """The Little Snitch rules: only the exact shape counts, the missing ones
+    are written with my-little-snitch's own words, and bare my-otr shows it."""
+    global _job_venv
+    me = pwd.getpwuid(os.geteuid()).pw_name
+    fw = t.dir / "Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/bin"
+    fw.mkdir(parents=True)
+    (fw / "python3.15").write_text("")
+    (t.dir / "venv" / "bin").mkdir(parents=True)
+    (t.dir / "venv" / "bin" / "python3").symlink_to(fw / "python3.15")
+    app = "/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python"
+    _t_stub_aria2c(t)
+    (t.dir / "lsn").write_text(f"#!/bin/sh\ncase $1 in list) cat '{t.dir}/ls.list';; "
+                               f"allow) echo \"$*\" >> '{t.dir}/ls.allowed';; esac\n", encoding="utf-8")
+    (t.dir / "lsn").chmod(0o755)
+    conf = str(_t_rec_config(t, "", f'RUN_AS="{me}"\nLITTLE_SNITCH="{t.dir}/lsn"\nLAUNCHD_PATH="{t.dir}"\n'))
+    s = load_settings(conf)
+    py, dl = f"{t.dir}/venv/bin/python3", f"{t.dir}/aria2c"
+    c = "/opt/homebrew/Cellar/python@3.15/*/Frameworks"
+    other = "".join(f"{i:06x}\t{line}\n" for i, line in enumerate((
+        f"script /LINKS/bin/my-otr via {c}{app}  allow  datenkeller.net  tcp/443  {me}",      # one script only
+        f"any via /opt/homebrew/Cellar/python@3.14/*/Frameworks{app.replace('3.15', '3.14')}  allow  datenkeller.net  tcp/443  {me}",
+        f"any via {c}{app}  allow  onlinetvrecorder.com  tcp/443  root",                       # another owner
+        f"any via {c}{app}  allow  onlinetvrecorder.com  tcp/80  {me}",                        # another port
+        f"any via /opt/homebrew/Cellar/aria2/*/bin/aria2c  allow  datenkeller.net  tcp/443  {me}",  # not any host
+        f"any via /usr/bin/curl  allow  any  tcp/80  {me}")))
+    _job_venv = lambda user: t.dir / "venv"
+    try:
+        for listed in ("", other):
+            (t.dir / "ls.list").write_text(listed)
+            rules, missing = snitch_check(s)
+            t.check(len(rules) == 4 and missing == rules,
+                    f"{'rules of another shape' if listed else 'no rule'}: all 4 missing: {[x.shown(me) for x in missing]}")
+        out = io.StringIO()
+        failed = ""
+        try:
+            with contextlib.redirect_stderr(out):
+                snitch_install(s)
+        except OtrError as e:
+            failed = e.text
+        OUT.__init__()
+        allowed = _t_lines(t.dir / "ls.allowed")
+        t.check(allowed == [f"allow go any datenkeller.net --port 443 --via {py} --owner {me}",
+                            f"allow go any onlinetvrecorder.com --port 443 --via {py} --owner {me}",
+                            f"allow go any any --port 443 --via {dl} --owner {me}",
+                            f"allow go any any --port 80 --via {dl} --owner {me}"], f"written as allow go: {allowed}")
+        t.check(failed.startswith("written, but") and "missing" in out.getvalue(),
+                f"each rule's state shown, and a list still without them after the writes fails loud: {failed}")
+        exact = other + "".join(f"ab{i:04x}\tany via {v}  allow  {r}  tcp/{n}  {me}{tok}\n" for i, (v, r, n, tok) in enumerate((
+            (c + app, "datenkeller.net", 443, ""), (c + app, "onlinetvrecorder.com", 443, "  allow?[version-path]"),
+            ("/opt/homebrew/Cellar/aria2/*/bin/aria2c", "any", 443, ""), ("/opt/homebrew/Cellar/aria2/*/bin/aria2c", "any", 80, ""))))
+        (t.dir / "ls.list").write_text(exact)
+        t.check(snitch_check(s)[1] == [], "the exact four: none missing")
+        (t.dir / "ls.allowed").unlink()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            snitch_install(s)
+        OUT.__init__()
+        t.check(not (t.dir / "ls.allowed").exists() and "4/4 rule(s) in place -- nothing to write" in out.getvalue(),
+                f"all in place: nothing written, said: {out.getvalue()}")
+        (t.dir / "ls.list").write_text(other)
+        rc, out2, _ = t.run(["--config", conf])
+        t.check(rc == 0 and "Little Snitch: 4 of 4 rule(s) MISSING" in out2
+                and f"    > missing: any via {dl} -> any, tcp/80, owner {me}" in out2, f"bare my-otr shows it: {out2}")
+        rc, out2, _ = t.run(["--config", str(_t_rec_config(t, "", f'RUN_AS="{me}"\nLITTLE_SNITCH=""\n'))])
+        t.check(rc == 0 and "Little Snitch" not in out2, f'LITTLE_SNITCH="": no rules, no line: {out2}')
+    finally:
+        _job_venv = _job_venv_default
+
+
 def t_test_mail(t: T) -> None:
     conf = _t_rec_config(t, "")
     rc, _, errs = t.run(["--config", str(conf), "--test-mail"])
@@ -3110,7 +3306,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
     t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
     t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_fetched, t_refresh_library, t_refresh_since, t_refresh_timeout, t_refresh_all_failed,
-    t_refresh_outdated, t_refresh_lock, t_state, t_install, t_test_mail,
+    t_refresh_outdated, t_refresh_lock, t_state, t_install, t_install_snitch, t_test_mail,
 ]
 
 

@@ -91,6 +91,18 @@ to write its lines.
   `LAUNCHD_LOG`; it gets `LAUNCHD_PATH` (launchd's own PATH would find neither
   Homebrew's Python nor aria2c). A `RUN_AT` between 02:00 and 02:59 is refused:
   launchd fires those twice on the night the clocks go back.
+- Little Snitch (macOS) holds a new program's connection until someone at the
+  screen answers it -- and nobody is there for the job. So `--install` first
+  shows the rules the job needs and writes the missing ones with
+  `LITTLE_SNITCH` (`my-little-snitch`; `""` writes none), each owned by
+  `RUN_AS`: any program via the job's Python (`RUN_AS`'s venv) to
+  `datenkeller.net` and `onlinetvrecorder.com` on tcp 443, and any program via
+  `OTR_DL_CMD` to any host -- the mirrors vary -- on tcp 443 and 80. "Any
+  program via", because Little Snitch names what sits at the top of the
+  process tree: my-otr, or the launcher in front of it. A rule for one script,
+  another Python version, owner or port does not count. Bare `my-otr` says
+  whether they are all in place. A new Python minor version is another
+  program: `--install` again writes its rules.
 
 
 Usage
@@ -165,7 +177,9 @@ Usage
       --create-config [<FILE>] the default config, to stdout or into a new FILE
       --install / --uninstall  the nightly refresh as a LaunchDaemon (root): RUN_AS,
                                RUN_AT, LAUNCHD_LABEL, LAUNCHD_LOG, LAUNCHD_PATH,
-                               FDA_LAUNCHER (a launcher that runs my-otr)
+                               FDA_LAUNCHER (a launcher that runs my-otr); first it
+                               writes the Little Snitch rules the job needs and lacks
+                               (LITTLE_SNITCH) -- bare my-otr shows if any is missing
       --test-mail              one mail through FAIL_MAIL_CMD, the failure mail's path
       --run-tests [<FILTER>]   the built-in tests (TAP) -- all, or those whose name holds FILTER
       --version                the exact build
