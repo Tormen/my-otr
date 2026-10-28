@@ -1880,6 +1880,15 @@ def cmd_state(argv: Sequence[str], config: Optional[str]) -> int:
     return 0
 
 
+def installer_comment() -> str:
+    """The plist's one line saying who installed it, when and how -- what
+    my-rollout reads to know the job is this tool's."""
+    who = pwd.getpwuid(os.geteuid()).pw_name
+    host = socket.gethostname().split(".")[0]
+    return (f"<!-- installed by {SCRIPT_NAME} --install ({who}) on {host}, "
+            f"{time.strftime('%Y-%m-%d %H:%M %z')}: generated, build {build_id()} -->")
+
+
 def plist_content(s: Settings, program: str) -> str:
     """The LaunchDaemon. With a launcher it runs as root and drops to its own
     user; without one, launchd runs my-otr as RUN_AS. Both outputs go into
@@ -1891,6 +1900,7 @@ def plist_content(s: Settings, program: str) -> str:
     env = f"\n\t\t<key>HOME</key> <string>{home}</string>" if home else ""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+{installer_comment()}
 <plist version="1.0">
 <dict>
 \t<key>Label</key>             <string>{s.launchd_label}</string>
@@ -1971,11 +1981,16 @@ def cmd_install(s: Settings, remove: bool) -> int:
     return 0
 
 
+def build_id() -> str:
+    """The first 12 hex of the sha256 of the bytes that run."""
+    return hashlib.sha256(Path(os.path.realpath(__file__)).read_bytes()).hexdigest()[:12]
+
+
 def version_line() -> str:
     """The exact build: the version; git's describe where this file is tracked
     in its OWN repository (else the stamped commit); the hash of the bytes."""
     me = Path(os.path.realpath(__file__))
-    build = hashlib.sha256(me.read_bytes()).hexdigest()[:12]
+    build = build_id()
     desc = SCRIPT_COMMIT
 
     def git(*a: str) -> str:
@@ -3052,6 +3067,10 @@ def t_install(t: T) -> None:
     me = getpass.getuser()
     s = load_settings(str(_t_rec_config(t, "", f'RUN_AS="{me}"\nRUN_AT="03:31"\nLAUNCHD_LOG="/var/log/x.log"\n')))
     plain = plist_content(s, "/usr/local/bin/my-otr")
+    third = plain.splitlines()[2]
+    t.check(third.startswith(f"<!-- installed by {SCRIPT_NAME} --install ({me}) on ")
+            and f": generated, build {build_id()} -->" in third,
+            f"the plist names who installed it, right after the DOCTYPE: {third}")
     t.check("<string>/usr/local/bin/my-otr</string>" in plain and f"<string>{me}</string>" in plain
             and "<key>HOME</key>" in plain and "<integer>3</integer>" in plain and "<integer>31</integer>" in plain,
             f"without a launcher: launchd runs my-otr as RUN_AS, with its HOME: {plain}")
