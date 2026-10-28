@@ -1290,7 +1290,7 @@ class Tally:
 
 def cmd_get(s: Settings, decode: bool, force: bool) -> int:
     """Download the names (or URLs) on stdin into the current folder; then,
-    unless --no-decode, decode every complete OTR file in it (#17)."""
+    unless `dl`, decode every complete OTR file in it (#17)."""
     folder = Path.cwd()
     phase("reading the names on stdin")
     lines = [ln for ln in sys.stdin.read().splitlines() if ln.strip()]
@@ -1325,7 +1325,7 @@ def cmd_get(s: Settings, decode: bool, force: bool) -> int:
     if decode:
         decode_all(s, sorted(p for p in folder.iterdir() if _kept_recording(p)), folder, force, t)
     OUT.msg(f" >>> {t.read} read: {t.skipped} skipped (here already), {t.downloaded} downloaded, "
-            + (f"{t.decoded} decoded" if decode else "none decoded (--no-decode)")
+            + (f"{t.decoded} decoded" if decode else "none decoded (dl)")
             + (f", {len(t.failed)} FAILED" if t.failed else ""))
     if t.failed:
         err("00061", f"{len(t.failed)} failed: " + ", ".join(t.failed))
@@ -2008,11 +2008,11 @@ COMMANDS
                                     spans midnight
       @Mon .. @Sun                  on the weekday
       @45 '>90' '<30'               lasting exactly / at least / at most N minutes
-  get [--no-decode]               download the names (or URLs) on stdin into
+  get                             download the names (or URLs) on stdin into
                                   the current folder -- not one whose copy
                                   here is as good -- then decode every complete
-                                  .otr2 / .otrkey in it; --no-decode: download only
-  dl                              the same as get --no-decode
+                                  .otr2 / .otrkey in it
+  dl                              get without the decode: download only
   decode <FILE>.. [<DIR>]         decode into DIR (else DEFAULT_DECODE_OUTP_DIR);
                                   FILE '-': the names on stdin
   login                           log in to otr.datenkeller.net (get does)
@@ -2076,7 +2076,10 @@ EXAMPLES
   {SCRIPT_NAME} search "bares fuer rares" | {SCRIPT_NAME} get
   {SCRIPT_NAME} record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1"""
 
-COMMANDS: Final = {"search": "search", "get": "get", "dl": "dl", "download": "dl", "decode": "decode",
+# a spelling no longer taken, and the command that does it now: answered, never run
+GONE: Final = {"download": "dl", "--no-decode": "dl"}
+
+COMMANDS: Final = {"search": "search", "get": "get", "dl": "dl", "decode": "decode",
                    "login": "login", "update-check": "update-check", "help": "help",
                    "record": "record", "list": "list", "refresh": "refresh"}
 
@@ -2092,7 +2095,6 @@ class Cli:
     log: Optional[bool] = None
     log_file: Optional[str] = None
     config: Optional[str] = None
-    no_decode: bool = False
 
 
 def parse_cli(argv: Sequence[str]) -> Cli:
@@ -2104,7 +2106,8 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         if rest or not a.startswith("-") or a == "-":
             if c.command is None:
                 if a not in COMMANDS:
-                    hint = f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else ""
+                    hint = (f" -- you mean `{SCRIPT_NAME} {GONE[a]}`" if a in GONE
+                            else f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else "")
                     err("00092", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
                 c.command = COMMANDS[a]
             else:
@@ -2133,8 +2136,6 @@ def parse_cli(argv: Sequence[str]) -> Cli:
                 c.config = v
             else:
                 c.log_file, c.log = v, True
-        elif a == "--no-decode":
-            c.no_decode = True
         elif a in ("--dry-run",) or key in ("--max", "--since"):
             if c.command not in ("refresh", "record") or (key == "--since" and c.command != "refresh"):
                 err("00094", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
@@ -2146,11 +2147,9 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif a in ("-h", "--help"):
             c.command = "help"
         else:
-            verb = a.lstrip("-")
+            verb = GONE.get(a, a.lstrip("-"))
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
             err("00095", f"no such option '{a}'{hint}")
-    if c.no_decode and c.command != "get":
-        err("00096", "--no-decode goes with 'get'")
     return c
 
 
@@ -2164,7 +2163,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00097", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00096", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -2177,7 +2176,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00098", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00097", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -2199,7 +2198,7 @@ def run(argv: Sequence[str]) -> int:
         return cmd_state(argv, c.config)
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00099", "update-check needs the <ZIP> of OTR's decoder")
+            err("00098", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -2219,11 +2218,11 @@ def run(argv: Sequence[str]) -> int:
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00100", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00099", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
-    return cmd_get(s, decode=c.command == "get" and not c.no_decode, force=force)
+    return cmd_get(s, decode=c.command == "get", force=force)
 
 
 def trace_file() -> Path:
@@ -2246,7 +2245,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00101 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00100 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -2254,7 +2253,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00102 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00101 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -2450,7 +2449,7 @@ def _t_get(t: T, names: str, *opts: str) -> Tuple[int, str, str]:
     t.routes[f"{DK_SITE}/?jdlAPI"] = lambda req: Reply(200, (
         "OK: https://dl.invalid/f/" + req.full_url.rsplit("getLinkFor=", 1)[1] + "?token=Tok\n").encode())
     t.routes[DK_SITE] = lambda req: Reply(200, b"")
-    return t.run(["--config", str(t.config()), *opts, "get", "--no-decode"], stdin=names)
+    return t.run(["--config", str(t.config()), *opts, "dl"], stdin=names)
 
 
 def t_get_downloads_off_argv(t: T) -> None:
@@ -2612,8 +2611,8 @@ def t_get_decodes_what_is_kept(t: T) -> None:
     addon = t.dir / "Foo_26.10.04_10-15_zdf_100_TVOON_DE.mpg.AddOn.otr2"
     addon.write_text("zip")
     _t_key_server(t, cek, hashlib.sha256(plain).hexdigest())
-    rc, _, errs = t.run(["--config", str(t.config()), "get", "--no-decode"])
-    t.check(rc == 0 and kept.exists() and "none decoded" in errs, f"--no-decode decodes nothing: {errs}")
+    rc, _, errs = t.run(["--config", str(t.config()), "dl"])
+    t.check(rc == 0 and kept.exists() and "none decoded" in errs, f"dl decodes nothing: {errs}")
     rc, _, errs = t.run(["--config", str(t.config()), "get"])
     t.check(rc == 0 and "1 decoded" in errs and not kept.exists(), f"get decodes the kept .otr2 (#17): {errs}")
     t.check(going.exists() and addon.exists(), "never one aria2c is still writing, never an add-on")
@@ -2657,7 +2656,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00098" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00097" in errs, "never over an existing file")
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
             f"the defaults parse cleanly, and an empty credential is named: {errs}")
@@ -2680,7 +2679,8 @@ def t_output_layers(t: T) -> None:
     for argv, want in ((["--nope"], "no such option '--nope'"),
                        (["--update-check"], "you mean `my-otr update-check`"),
                        (["x.otrkey"], "you mean `my-otr decode x.otrkey`"),
-                       (["dl", "--no-decode"], "--no-decode goes with 'get'")):
+                       (["get", "--no-decode"], "you mean `my-otr dl`"),
+                       (["download"], "you mean `my-otr dl`")):
         rc, _, errs = t.run(argv)
         t.check(rc == 1 and want in errs, f"{argv}: {errs}")
     rc, out, errs = t.run(["--dl"])
@@ -2732,7 +2732,7 @@ def t_venv_only_to_decode(t: T) -> None:
     """--help must answer at once on a machine with no venv: my-rollout gives it
     20s, and a pip install there kept a tested copy from being offered (ada)."""
     for argv, want in ((["--help"], False), ([], False), (["--version"], False), (["--create-config"], False),
-                       (["search", "x", "@zdf"], False), (["dl"], False), (["get", "--no-decode"], False),
+                       (["search", "x", "@zdf"], False), (["dl"], False),
                        (["update-check", "z.zip"], False), (["--nope"], False),
                        (["get"], True), (["-Q", "get", "--log-file", "l"], True), (["decode", "f.otr2"], True),
                        (["--decode", "f"], False), (["--run-tests"], True), (["--run-tests=boot"], True)):
@@ -2752,7 +2752,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00102 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00101 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()
@@ -3124,7 +3124,7 @@ def run_tests(name_filter: str) -> int:
 
 def needs_venv(argv: Sequence[str]) -> bool:
     """Only decoding needs cryptography: the venv is set up for `decode`, `get`
-    (unless --no-decode) and the tests -- never for --help, a search or a
+    and the tests -- never for --help, a search or a
     download, which then answer at once on a machine without it."""
     if argv[:1] and argv[0].partition("=")[0] == "--run-tests":
         return True
@@ -3132,7 +3132,7 @@ def needs_venv(argv: Sequence[str]) -> bool:
         c = parse_cli(argv)
     except OtrError:
         return False          # main says what is wrong with the arguments
-    return c.command == "decode" or (c.command == "get" and not c.no_decode)
+    return c.command in ("decode", "get")
 
 
 if __name__ == "__main__":

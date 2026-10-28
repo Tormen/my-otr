@@ -108,11 +108,11 @@ Usage
                                         spans midnight
           @Mon .. @Sun                  on the weekday
           @45 '>90' '<30'               lasting exactly / at least / at most N minutes
-      get [--no-decode]               download the names (or URLs) on stdin into
+      get                             download the names (or URLs) on stdin into
                                       the current folder -- not one whose copy
                                       here is as good -- then decode every complete
-                                      .otr2 / .otrkey in it; --no-decode: download only
-      dl                              the same as get --no-decode
+                                      .otr2 / .otrkey in it
+      dl                              get without the decode: download only
       decode <FILE>.. [<DIR>]         decode into DIR (else DEFAULT_DECODE_OUTP_DIR);
                                       FILE '-': the names on stdin
       login                           log in to otr.datenkeller.net (get does)
