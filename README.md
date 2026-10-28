@@ -50,6 +50,10 @@ as `search`, shows what the search finds now, and adds one `record` line to
 file explains itself), the folder and the title always in `''`. FOLDER is
 absolute, or below `LIBRARY_DIR`.
 
+The recordings are a file of their own, not lines in the config: the config
+under `/LINKS/default` is root's, while `record` runs as you and must be able
+to write its lines.
+
     my-otr record 'series/bares/' 'bares fuer rares' @zdf '>8d' @15:05        # every day it is on
     my-otr record 'series/heute/' 'heute show' @zdf '>7d' --max 2             # weekly, 2 at most
     my-otr record '/Volumes/films/' 'tatort' @ard @2026-11-03 @20:15 --max 1    # one evening
