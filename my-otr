@@ -680,7 +680,9 @@ def parse_filters(args: Sequence[str]) -> Filters:
     day_at: Optional[datetime.date] = None
     for a in args:
         if a == ",":
-            err("00019", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's API answers no description")
+            err("00019", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's search answers "
+                         "file names only, and its EPG info at most the show's general description -- never "
+                         "what an episode is about")
         if re.fullmatch(r">\d{1,3}d", a):          # since N days ago: a recurring recording
             if f.day_from:
                 err("00020", f"'{a}': one >DATE only")
@@ -2401,7 +2403,8 @@ def t_search_filters(t: T) -> None:
         got = first_letters(*args)
         t.check(got == want, f"{what}: {args} -> {got}")
     rc, _, errs = _t_searched(t, ",", "desc")
-    t.check(rc == 1 and "ERROR 00019" in errs, "a DESCRIPTION search is refused, not silently ignored")
+    t.check(rc == 1 and "ERROR 00019" in errs and "the show's general description" in errs,
+            f"a DESCRIPTION search is refused, saying why, not silently ignored: {errs}")
     rc, _, errs = _t_searched(t, "@2026-10-06", ">2026-10-01")
     t.check(rc == 1 and "ERROR 00025" in errs, "@DATE with >DATE is refused")
 
