@@ -79,6 +79,15 @@ to write its lines.
 - `refresh --since <DATE>` takes DATE as every line's from-date, for that run
   only: a catch-up after a long gap (`--dry-run` first shows what it would
   fetch).
+- `refresh --background` starts the same refresh detached -- in a session of
+  its own, so neither a Ctrl-C nor the end of the caller's terminal stops it
+  -- and returns once it runs. A catch-up takes hours (`SLEEP_SECONDS`
+  between two searches, then the downloads): launch it, then look. What it
+  prints goes to `my-otr.background.log` beside the LOGFILE.
+- `my-otr status` shows the last refresh, the nightly one too: running (at
+  which recording, doing what, what failed so far), done (its rc, its error,
+  each failure), or STOPPED -- killed before it finished. Every refresh keeps
+  this in `<RECORDINGS_FILE>.status`, rewritten at each step.
 - A one-off more than `PAST_AFTER_DAYS` (7) after its last day is outdated: no
   longer searched, and named in each run -- "please check/remove". my-otr
   never removes a line itself.
@@ -144,19 +153,26 @@ Usage
                                       the search finds now, then adds the line
       list                            the recordings programmed (not OTR's: search
                                       finds those); an outdated one is marked
-      refresh [<TEXT>] [--since <DATE>] [--dry-run]
+      refresh [<TEXT>..] [--since <DATE>] [--dry-run] [--background]
                                       each recording: search, then get the new ones
                                       into its folder -- new: no file anywhere below
                                       LIBRARY_DIR carries OTR's slot (date, time,
                                       channel, length -- kept by a renamed file),
                                       and not in <RECORDINGS_FILE>.fetched, the
                                       names refresh fetched (a deleted one too);
-                                      TEXT: only lines holding it; --since: DATE as
+                                      TEXT: only lines holding one; --since: DATE as
                                       every line's from-date, this run only (a line
                                       with its own @DATE keeps it); --dry-run: search
                                       only. One failing never stops the others. A
                                       one-off PAST_AFTER_DAYS after its last day is
-                                      outdated: not searched, named
+                                      outdated: not searched, named. --background:
+                                      start it detached and return -- its output
+                                      goes to my-otr.background.log beside the
+                                      LOGFILE; `status` follows it
+      status                          the last refresh (the nightly one too):
+                                      running -- at which recording, doing what,
+                                      what failed so far -- done with its rc and
+                                      failures, or killed before it finished
       (bare)                          a short usage line and the state
       update-check <ZIP>              what a new release of OTR's decoder changed in
                                       the protocol my-otr speaks

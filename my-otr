@@ -198,13 +198,17 @@ class Out:
 
 OUT = Out()
 _phase = "starting"
+_status: Optional["RefreshStatus"] = None     # set while a refresh runs
 
 
 def phase(text: str) -> None:
-    """What the run is doing now -- the Ctrl-C line names it."""
+    """What the run is doing now -- the Ctrl-C line names it, and `status`
+    reads it while a refresh runs."""
     global _phase
     _phase = text
     OUT.dbg(f"phase: {text}")
+    if _status is not None:
+        _status.save()
 
 
 # --- 2. config -------------------------------------------------------------
@@ -1508,23 +1512,34 @@ def read_recordings(s: Settings) -> List[Programmed]:
     return found
 
 
+def lock_dir(s: Settings) -> Path:
+    return s.recordings_file.with_name(s.recordings_file.name + ".lock")
+
+
+def lock_owner(lock: Path) -> Tuple[str, bool]:
+    """The owner line of LOCK, and whether it is held: its owner alive, or
+    not written yet (the holder has just made it)."""
+    try:
+        owner = (lock / "owner").read_text(encoding="utf-8").strip()
+    except OSError:
+        owner = ""
+    m = re.match(r"pid=(\d+)", owner)
+    return owner or "owner not yet written", m is None or _alive(int(m.group(1)))
+
+
 @contextlib.contextmanager
 def recordings_lock(s: Settings) -> Generator[None, None, None]:
     """One refresh or record at a time: an atomic mkdir beside the recordings,
     its owner's pid inside; a dead owner's lock is broken, and said."""
-    lock = s.recordings_file.with_name(s.recordings_file.name + ".lock")
+    lock = lock_dir(s)
     while True:
         try:
             lock.mkdir()
             break
         except FileExistsError:
-            try:
-                owner = (lock / "owner").read_text(encoding="utf-8").strip()
-            except OSError:
-                owner = ""
-            m = re.match(r"pid=(\d+)", owner)
-            if m is None or _alive(int(m.group(1))):
-                err("00072", f"another my-otr is refreshing or recording ({owner or 'owner not yet written'}): "
+            owner, held = lock_owner(lock)
+            if held:
+                err("00072", f"another my-otr is refreshing or recording ({owner}): "
                              f"{lock} -- run again when it is done")
             OUT.msg(f" >>> breaking a stale lock: its owner is gone ({owner})")
             with contextlib.suppress(OSError):
@@ -1643,6 +1658,77 @@ def note_fetched(s: Settings, names: Sequence[str], known: Set[str]) -> None:
     known.update(slot_mark(n) for n in new)
 
 
+def status_file(s: Settings) -> Path:
+    """Where a refresh keeps its state for `status`, beside RECORDINGS_FILE."""
+    return s.recordings_file.with_name(s.recordings_file.name + ".status")
+
+
+def background_output(s: Settings) -> Path:
+    """What a `refresh --background` prints, as a terminal would see it:
+    beside the LOGFILE, else in the temp directory."""
+    log = Path(s.logfile).expanduser() if s.log and s.logfile else None
+    return (log.parent if log is not None else Path(tempfile.gettempdir())) / f"{SCRIPT_NAME}.background.log"
+
+
+@dataclass
+class RefreshStatus:
+    """The running refresh, as `status` shows it: rewritten whole (temp file
+    + rename) at every phase, so a reader never sees half of it."""
+
+    path: Path
+    command: str
+    started: str
+    total: int = 0
+    at: int = 0
+    failures: List[str] = field(default_factory=lambda: [])
+    ended: str = ""
+    rc: Optional[int] = None
+    error: str = ""
+    unwritable: bool = False
+
+    def save(self) -> None:
+        data = {"pid": os.getpid(), "command": self.command, "started": self.started, "phase": _phase,
+                "at": self.at, "total": self.total, "failures": self.failures,
+                "ended": self.ended, "rc": self.rc, "error": self.error}
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError as e:
+            if not self.unwritable:      # the refresh goes on; `status` will be stale
+                OUT.warn(f"cannot write {self.path}: {e.strerror} -- `{SCRIPT_NAME} status` cannot follow this run")
+            self.unwritable = True
+
+
+def _now() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+@contextlib.contextmanager
+def refresh_status(s: Settings, args: Sequence[str]) -> Generator[RefreshStatus, None, None]:
+    """The status of this refresh, from its start to how it ended: rc 0, 1
+    with the error, 130 on Ctrl-C. A run killed outright leaves it 'running'
+    with a pid that is gone -- `status` says so."""
+    global _status
+    st = RefreshStatus(status_file(s), shlex.join(["refresh", *args]), _now())
+    _status = st
+    st.save()
+    st.rc = 70
+    try:
+        yield st
+        st.rc = 0
+    except OtrError as e:
+        st.rc, st.error = 1, f"ERROR {e.code}: {e.text.splitlines()[0]}"
+        raise
+    except KeyboardInterrupt:
+        st.rc, st.error = 130, f"interrupted (Ctrl-C) while {_phase}"
+        raise
+    finally:
+        _status = None
+        st.ended = _now()
+        st.save()
+
+
 def since_words(words: Sequence[str], since: datetime.date) -> Tuple[str, ...]:
     """A line's search with SINCE as its from-date, for one run; a line that
     names its own day (@DATE) keeps it."""
@@ -1700,7 +1786,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
     dry = "--dry-run" in args
     since: Optional[datetime.date] = None
     texts: List[str] = []
-    it = iter(a for a in args if a != "--dry-run")
+    it = iter(a for a in args if a not in ("--dry-run", "--background"))
     for a in it:
         key, eq, val = a.partition("=")
         if key != "--since":
@@ -1711,24 +1797,26 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
             since = datetime.date.fromisoformat(v)
         except ValueError:
             err("00077", f"--since '{v}' -- a date, YYYY-MM-DD")
-    if len(texts) > 1:
-        err("00078", "refresh [<TEXT>] [--since <DATE>] [--dry-run] -- one TEXT at most (a part of the `record` line)")
-    text = texts[0] if texts else None
     recs = read_recordings(s)
     if not recs:
-        err("00079", f"no recordings in {s.recordings_file} -- `{SCRIPT_NAME} record ...` adds one")
-    chosen = [r for r in recs if text is None or text in r.line()]
-    if not chosen:
-        err("00080", f"no recording holds '{text}' -- `{SCRIPT_NAME} list` shows them")
-    with recordings_lock(s):
+        err("00078", f"no recordings in {s.recordings_file} -- `{SCRIPT_NAME} record ...` adds one")
+    unknown = [x for x in texts if not any(x in r.line() for r in recs)]
+    if unknown:
+        names = "', '".join(unknown)
+        err("00079", f"no recording holds '{names}' -- `{SCRIPT_NAME} list` shows them")
+    chosen = [r for r in recs if not texts or any(x in r.line() for x in texts)]
+    if "--background" in args:
+        return launch_refresh(s, [a for a in args if a != "--background"])
+    with recordings_lock(s), refresh_status(s, args) as st:
         today = datetime.date.today()
-        failures: List[str] = []
+        failures = st.failures
+        st.total = len(chosen)
         searched = failed_searches = done = 0
         known = fetched_before(s)
         phase("looking through the library")
         library = library_slots(s, chosen)
         OUT.det(f"    > the library holds {len(library)} OTR recording(s)")
-        for rec in chosen:
+        for st.at, rec in enumerate(chosen, 1):
             if rec.outdated(s, today):
                 OUT.warn(f"outdated line (last day {rec.last_day}): {rec.search} -- please check/remove ({rec.where})")
                 continue
@@ -1780,7 +1868,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                 OUT.warn(f"{rec.search}: {why}")
                 continue
             OUT.msg(f" >>> {rec.search}: fetched {len(names)} [{of}, rc 0]")
-        if text is None and not dry and s.run_after_refresh:
+        if not texts and not dry and s.run_after_refresh:
             phase("running RUN_AFTER_REFRESH")
             try:
                 rc = subprocess.run(list(s.run_after_refresh), stdin=subprocess.DEVNULL).returncode
@@ -1798,7 +1886,79 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                     if searched > 1 and failed_searches == searched else "")
             text_ = f"{len(failures)} of {done} recording(s) failed:{head}\n" + "\n".join(failures)
             mail_failure(s, text_)
-            err("00081", text_)
+            err("00080", text_)
+    return 0
+
+
+def launch_refresh(s: Settings, args: Sequence[str]) -> int:
+    """The same refresh, detached: a session of its own (an interrupt or the
+    end of the caller's terminal does not reach it), its output into
+    background_output(); this returns once it is seen running."""
+    if lock_dir(s).is_dir():
+        owner, held = lock_owner(lock_dir(s))
+        if held:
+            err("00081", f"a refresh is running already ({owner}) -- `{SCRIPT_NAME} status` shows how far it got")
+    out = background_output(s)
+    argv = [*_child, *child_options(s), *(["-V"] if OUT.vrb and not OUT.dbg_on else []), "refresh", *args]
+    OUT.dbg(f"background: {shlex.join(argv)}  > {out}")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w", encoding="utf-8") as f:
+            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                                 cwd=Path.home(), start_new_session=True)
+    except OSError as e:
+        err("00082", f"cannot start the background refresh: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+    try:
+        rc = p.wait(timeout=2)      # a refresh that fails at once (its config, the lock) says so here
+    except subprocess.TimeoutExpired:
+        OUT.msg(f" >>> refresh launched in the background [pid {p.pid}] -- `{SCRIPT_NAME} status` shows how far it got")
+        OUT.msg(f"    > its output: {out}")
+        return 0
+    last = (out.read_text(encoding="utf-8", errors="replace").strip().splitlines() or ["no output"])[-1]
+    if rc != 0:
+        err("00083", f"the background refresh ended at once [rc {rc}]: {last}")
+    OUT.msg(f" >>> the background refresh is done already [rc 0] -- its output: {out}")
+    return 0
+
+
+def cmd_status(s: Settings) -> int:
+    """The last refresh, read from status_file(): running (how far, what now,
+    what failed so far), done (its rc and failures), or killed without a word."""
+    p = status_file(s)
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        OUT.result(f" >>> refresh: none recorded yet [{p}]")
+        return 0
+    except OSError as e:
+        err("00084", f"cannot read {p}: {e.strerror}")
+    try:
+        d = cast(Dict[str, object], json.loads(raw))
+        pid, at, total = int(cast(int, d["pid"])), int(cast(int, d["at"])), int(cast(int, d["total"]))
+        command, started, now, ended, error = (str(d[k]) for k in ("command", "started", "phase", "ended", "error"))
+        rc = None if d["rc"] is None else int(cast(int, d["rc"]))
+        failures = [str(x).strip() for x in cast(List[object], d["failures"])]
+    except (ValueError, KeyError, TypeError) as e:
+        err("00085", f"{p}: not a status my-otr wrote ({type(e).__name__}: {e})")
+    failed = f"{len(failures)} failed" + (" so far" if not ended else "")
+    if ended:
+        OUT.result(f" >>> refresh: done {ended} [rc {rc}], {total} recording(s), {failed} -- started {started}")
+    elif _alive(pid):
+        OUT.result(f" >>> refresh: running [pid {pid}] since {started}, at {at} of {total} recording(s), {failed}"
+                   f" -- now {now}")
+    else:
+        OUT.result(f" >>> refresh: STOPPED, never finished -- pid {pid} is gone; started {started}, "
+                   f"it was at {at} of {total} recording(s), {now}")
+    if error:
+        OUT.result(f"    > {error}")
+    for x in failures:
+        OUT.result(f"    > failed: {x}")
+    out = background_output(s)
+    with contextlib.suppress(OSError):
+        if out.stat().st_mtime >= time.mktime(time.strptime(started, "%Y-%m-%d %H:%M:%S")):
+            OUT.result(f"    > its output: {out}")
+    if OUT.vrb:
+        OUT.result(f"    > {command}   [{p}; every line of every run: {s.logfile if s.log else 'no LOGFILE'}]")
     return 0
 
 
@@ -1814,7 +1974,7 @@ def cmd_record(s: Settings, args: Sequence[str]) -> int:
         if found is None:
             OUT.warn(f"the search gave no answer within SEARCH_TIMEOUT={s.search_timeout}s -- recorded anyway")
         elif found[0] != 0:
-            err("00082", f"the search failed [rc {found[0]}] -- nothing recorded: {rec.search}")
+            err("00086", f"the search failed [rc {found[0]}] -- nothing recorded: {rec.search}")
         elif found[1]:
             OUT.msg(f" >>> found {len(found[1])} now:")
             for n in found[1]:
@@ -1950,18 +2110,18 @@ _geteuid: Callable[[], int] = os.geteuid
 def check_install(s: Settings) -> None:
     """What --install refuses, before root is even asked for."""
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s.run_at):
-        err("00083", f"RUN_AT=\"{s.run_at}\" -- HH:MM")
+        err("00087", f"RUN_AT=\"{s.run_at}\" -- HH:MM")
     if s.run_at.startswith("02:"):
-        err("00084", f"RUN_AT=\"{s.run_at}\": launchd fires a time between 02:00 and 02:59 twice on the night "
+        err("00088", f"RUN_AT=\"{s.run_at}\": launchd fires a time between 02:00 and 02:59 twice on the night "
                      "the clocks go back -- choose one outside it")
     if not s.run_as:
-        err("00085", "RUN_AS is not set -- who does the nightly refresh run as?")
+        err("00089", "RUN_AS is not set -- who does the nightly refresh run as?")
     try:
         pwd.getpwnam(s.run_as)
     except KeyError:
-        err("00086", f"RUN_AS=\"{s.run_as}\": no such user here")
+        err("00090", f"RUN_AS=\"{s.run_as}\": no such user here")
     if s.fda_launcher and not os.access(s.fda_launcher, os.X_OK):
-        err("00087", f"FDA_LAUNCHER \"{s.fda_launcher}\" is not there, or not executable")
+        err("00091", f"FDA_LAUNCHER \"{s.fda_launcher}\" is not there, or not executable")
 
 
 def cmd_install(s: Settings, remove: bool) -> int:
@@ -1969,11 +2129,11 @@ def cmd_install(s: Settings, remove: bool) -> int:
     if not remove:
         check_install(s)
     if _geteuid() != 0:
-        err("00088", f"needs root -- as root: {SCRIPT_NAME} --{'uninstall' if remove else 'install'}")
+        err("00092", f"needs root -- as root: {SCRIPT_NAME} --{'uninstall' if remove else 'install'}")
     target = f"system/{s.launchd_label}"
     if remove:
         if not p.exists():
-            err("00089", f"--uninstall: {p} is not there -- nothing installed")
+            err("00093", f"--uninstall: {p} is not there -- nothing installed")
         subprocess.run(["launchctl", "bootout", target], stdin=subprocess.DEVNULL)
         p.unlink()
         OUT.msg(f" >>> removed {p} (and the job from launchd)")
@@ -1985,7 +2145,7 @@ def cmd_install(s: Settings, remove: bool) -> int:
     try:
         new.write_text(plist_content(s, program), encoding="utf-8")
         if subprocess.run(["plutil", "-lint", "-s", str(new)]).returncode != 0:
-            err("00090", "--install: the plist written does not lint -- nothing installed")
+            err("00094", "--install: the plist written does not lint -- nothing installed")
         os.chmod(new, 0o644)
         with contextlib.suppress(OSError):
             Path(s.launchd_log).parent.mkdir(parents=True, exist_ok=True)
@@ -1995,7 +2155,7 @@ def cmd_install(s: Settings, remove: bool) -> int:
         with contextlib.suppress(OSError):
             new.unlink()
     if subprocess.run(["launchctl", "bootstrap", "system", str(p)]).returncode != 0:
-        err("00091", f"--install: launchctl bootstrap failed for {p}")
+        err("00095", f"--install: launchctl bootstrap failed for {p}")
     how = f"through {s.fda_launcher} (it drops to its own user)" if s.fda_launcher else f"as {s.run_as}"
     OUT.msg(f" >>> installed {p}: `{SCRIPT_NAME} -Q refresh` daily at {s.run_at}, {how}; its output: {s.launchd_log}")
     return 0
@@ -2063,10 +2223,10 @@ def snitch_check(s: Settings) -> Tuple[List[SnitchRule], List[SnitchRule]]:
         r = subprocess.run([s.little_snitch, "list"], capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=120)
     except (OSError, subprocess.SubprocessError) as e:
-        err("00092", f"{s.little_snitch} list: {e}")
+        err("00096", f"{s.little_snitch} list: {e}")
     if r.returncode != 0:
         last = (r.stderr.strip().splitlines() or ["no message"])[-1]
-        err("00093", f"{s.little_snitch} list [{r.returncode}]: {last}")
+        err("00097", f"{s.little_snitch} list [{r.returncode}]: {last}")
     lines = r.stdout.splitlines()
 
     def there(x: SnitchRule) -> bool:
@@ -2096,11 +2256,11 @@ def snitch_install(s: Settings) -> None:
     for x in missing:
         argv = [s.little_snitch, "allow", "go", "any", x.remote, "--port", str(x.port), "--via", x.via, "--owner", s.run_as]
         if subprocess.run(argv, stdin=subprocess.DEVNULL).returncode != 0:
-            err("00094", f"the Little Snitch rule {x.shown(s.run_as)} was not written")
+            err("00098", f"the Little Snitch rule {x.shown(s.run_as)} was not written")
     if missing:
         rules, still = snitch_check(s)
         if still:
-            err("00095", f"written, but {s.little_snitch} list does not show: {still[0].shown(s.run_as)}")
+            err("00099", f"written, but {s.little_snitch} list does not show: {still[0].shown(s.run_as)}")
         OUT.msg(f" >>> Little Snitch: {len(missing)} rule(s) written, {len(rules) - len(missing)} were in place")
     else:
         OUT.msg(snitch_summary(s, rules, missing) + " -- nothing to write")
@@ -2168,19 +2328,26 @@ PROGRAMMED RECORDINGS -- RECORDINGS_FILE, one `record` line each
                                   the search finds now, then adds the line
   list                            the recordings programmed (not OTR's: search
                                   finds those); an outdated one is marked
-  refresh [<TEXT>] [--since <DATE>] [--dry-run]
+  refresh [<TEXT>..] [--since <DATE>] [--dry-run] [--background]
                                   each recording: search, then get the new ones
                                   into its folder -- new: no file anywhere below
                                   LIBRARY_DIR carries OTR's slot (date, time,
                                   channel, length -- kept by a renamed file),
                                   and not in <RECORDINGS_FILE>.fetched, the
                                   names refresh fetched (a deleted one too);
-                                  TEXT: only lines holding it; --since: DATE as
+                                  TEXT: only lines holding one; --since: DATE as
                                   every line's from-date, this run only (a line
                                   with its own @DATE keeps it); --dry-run: search
                                   only. One failing never stops the others. A
                                   one-off PAST_AFTER_DAYS after its last day is
-                                  outdated: not searched, named
+                                  outdated: not searched, named. --background:
+                                  start it detached and return -- its output
+                                  goes to my-otr.background.log beside the
+                                  LOGFILE; `status` follows it
+  status                          the last refresh (the nightly one too):
+                                  running -- at which recording, doing what,
+                                  what failed so far -- done with its rc and
+                                  failures, or killed before it finished
   (bare)                          a short usage line and the state
   update-check <ZIP>              what a new release of OTR's decoder changed in
                                   the protocol my-otr speaks
@@ -2225,7 +2392,7 @@ GONE: Final = {"download": "dl", "--no-decode": "dl"}
 
 COMMANDS: Final = {"search": "search", "get": "get", "dl": "dl", "decode": "decode",
                    "login": "login", "update-check": "update-check", "help": "help",
-                   "record": "record", "list": "list", "refresh": "refresh"}
+                   "record": "record", "list": "list", "refresh": "refresh", "status": "status"}
 
 
 @dataclass
@@ -2252,7 +2419,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
                 if a not in COMMANDS:
                     hint = (f" -- you mean `{SCRIPT_NAME} {GONE[a]}`" if a in GONE
                             else f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else "")
-                    err("00096", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
+                    err("00100", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
                 c.command = COMMANDS[a]
             else:
                 c.args.append(a)
@@ -2275,14 +2442,14 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif key in ("--log-file", "--config"):
             v = val if eq else next(it, None)
             if not v:
-                err("00097", f"{key} needs a <FILE>")
+                err("00101", f"{key} needs a <FILE>")
             if key == "--config":
                 c.config = v
             else:
                 c.log_file, c.log = v, True
-        elif a in ("--dry-run",) or key in ("--max", "--since"):
+        elif a in ("--dry-run", "--background") or key in ("--max", "--since"):
             if c.command not in ("refresh", "record") or (key == "--since" and c.command != "refresh"):
-                err("00098", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
+                err("00102", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
             c.args.append(a)
             if key in ("--max", "--since") and not eq:
                 c.args.append(next(it, ""))
@@ -2293,7 +2460,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         else:
             verb = GONE.get(a, a.lstrip("-"))
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
-            err("00099", f"no such option '{a}'{hint}")
+            err("00103", f"no such option '{a}'{hint}")
     return c
 
 
@@ -2307,7 +2474,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00100", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00104", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -2320,7 +2487,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00101", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00105", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -2342,7 +2509,7 @@ def run(argv: Sequence[str]) -> int:
         return cmd_state(argv, c.config)
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00102", "update-check needs the <ZIP> of OTR's decoder")
+            err("00106", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -2359,10 +2526,12 @@ def run(argv: Sequence[str]) -> int:
         return cmd_test_mail(s)
     if c.command == "list":
         return cmd_list(s)
+    if c.command == "status":
+        return cmd_status(s)
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00103", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00107", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
@@ -2389,7 +2558,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00104 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00108 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -2397,7 +2566,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00105 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00109 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -2802,7 +2971,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00101" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00105" in errs, "never over an existing file")
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
             f"the defaults parse cleanly, and an empty credential is named: {errs}")
@@ -2898,7 +3067,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00105 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00109 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()
@@ -2935,7 +3104,7 @@ while i < len(args):
     if args[i] in ("--config", "--log-file"):
         i += 2
         continue
-    if args[i] in ("-L", "-Q", "-D"):
+    if args[i] in ("-L", "-Q", "-V", "-D"):
         i += 1
         continue
     verb = args[i]
@@ -2947,6 +3116,10 @@ if verb == "search":
     title = words[0] if words else ""
     if "broken" in title:
         sys.exit(3)
+    if "peek" in title:                  # what `status` sees while the run is on
+        st = os.path.join(os.path.dirname(calls), "rec.status")
+        with open(st) as a, open(st + ".peek", "w") as b:
+            b.write(a.read())
     if "hang" in title:
         subprocess.Popen(["/bin/sleep", "31.7"])
         time.sleep(31.7)
@@ -2960,6 +3133,12 @@ elif verb == "get":
             f.write("got " + line.strip() + " @" + os.getcwd() + "\\n")
             if creates and "three_1" not in line:     # three_1: a download that fails
                 open(line.strip(), "w").close()
+elif verb == "refresh":
+    if "fails" in words:
+        print("ERROR 09999 [1]: a refresh that fails at once")
+        sys.exit(1)
+    if "slow" in words:
+        time.sleep(4)
 """
 
 
@@ -3055,6 +3234,12 @@ def t_refresh(t: T) -> None:
     calls.unlink()
     rc, _, errs = t.run(["--config", str(conf), "refresh", "alpha", "--dry-run"])
     t.check(rc == 0 and "would fetch 2" in errs and not any(c.startswith("get") for c in _t_lines(calls)), errs)
+    calls.unlink()
+    rc, _, errs = t.run(["--config", str(conf), "refresh", "delta", "beta", "--dry-run"])
+    searched = [c.split(" @")[0] for c in _t_lines(calls) if c.startswith("search")]
+    t.check(rc == 0 and searched == ["search beta zero", "search delta one"], f"several TEXTs: the lines holding one: {searched}")
+    rc, _, errs = t.run(["--config", str(conf), "refresh", "delta", "nope", "--dry-run"])
+    t.check(rc == 1 and "no recording holds 'nope'" in errs, f"a TEXT no line holds is refused, not skipped: {errs}")
 
 
 def t_refresh_here(t: T) -> None:
@@ -3176,6 +3361,69 @@ def t_refresh_lock(t: T) -> None:
     (lock / "owner").write_text(f"pid={p.pid} at=then\n")
     rc, _, errs = t.run(["--config", str(conf), "refresh"])
     t.check(rc == 0 and "breaking a stale lock" in errs and not lock.exists(), errs)
+
+
+def t_refresh_status(t: T) -> None:
+    _t_child(t)
+    conf = _t_rec_config(t, "record a/ 'alpha peek one'\nrecord b/ 'beta broken'\n")
+    rc, out, _ = t.run(["--config", str(conf), "status"])
+    t.check(rc == 0 and f"refresh: none recorded yet [{t.dir}/rec.status]" in out, f"no run yet: {out}")
+    t.run(["--config", str(conf), "refresh"])
+    peek = (t.dir / "rec.status.peek").read_text() if (t.dir / "rec.status.peek").exists() else ""
+    t.check('"at": 1' in peek and '"total": 2' in peek and '"ended": ""' in peek
+            and "refreshing 'alpha peek one'" in peek, f"while it runs: at 1 of 2, what it does now: {peek}")
+    rc, out, _ = t.run(["--config", str(conf), "status"])
+    t.check(rc == 0 and " [rc 1], 2 recording(s), 1 failed -- started " in out
+            and "    > ERROR 00080: 1 of 2 recording(s) failed:" in out
+            and "    > failed: 'beta broken': the search failed [rc 3]" in out, f"done, its rc, what failed: {out}")
+    st = t.dir / "rec.status"
+    d = json.loads(st.read_text())
+    d.update(ended="", rc=None, error="", at=2, total=5, phase="pausing before 'x'", failures=[])
+    st.write_text(json.dumps(d))
+    rc, out, _ = t.run(["--config", str(conf), "status"])
+    t.check(f"refresh: running [pid {os.getpid()}] since " in out and ", at 2 of 5 recording(s), 0 failed so far -- now "
+            "pausing before 'x'" in out, f"a live pid is running: {out}")
+    p = subprocess.Popen(["true"])
+    p.wait()
+    st.write_text(json.dumps({**d, "pid": p.pid}))
+    rc, out, _ = t.run(["--config", str(conf), "status"])
+    t.check(f"refresh: STOPPED, never finished -- pid {p.pid} is gone" in out and "at 2 of 5" in out,
+            f"a dead pid without an end is said: {out}")
+    rc, out2, _ = t.run(["--config", str(conf), "-V", "status"])
+    t.check(out2.startswith(out) and f"[{st};" in out2[len(out):], f"-V adds the command and the file: {out2}")
+    st.write_text("{")
+    rc, _, errs = t.run(["--config", str(conf), "status"])
+    t.check(rc == 1 and "not a status my-otr wrote" in errs, errs)
+
+
+def t_refresh_background(t: T) -> None:
+    calls = _t_child(t)
+    conf = _t_rec_config(t, "record a/ 'alpha slow'\nrecord b/ 'beta fails'\n", f'LOGFILE="{t.dir}/log/my.log"\nLOG="1"\n')
+    t0 = time.time()
+    rc, _, errs = t.run(["--config", str(conf), "refresh", "slow", "--since", "2026-07-01", "--background"])
+    took = time.time() - t0
+    m = re.search(r"refresh launched in the background \[pid (\d+)\]", errs)
+    pid = int(m.group(1)) if m else 0
+    try:
+        t.check(rc == 0 and m is not None and took < 3.5 and _alive(pid), f"it returns while the refresh runs: {took:.1f}s {errs}")
+        t.check(pid > 0 and os.getsid(pid) == pid, "a session of its own: Ctrl-C at the caller does not reach it")
+        t.check(f"its output: {t.dir}/log/my-otr.background.log" in errs, f"its output, beside the LOGFILE: {errs}")
+        line = next((c for c in _t_lines(calls) if c.startswith("refresh ")), "")
+        t.check(line.startswith("refresh slow --since 2026-07-01 @"), f"the same refresh, without --background: {line}")
+        lock = t.dir / "rec.lock"
+        lock.mkdir()
+        (lock / "owner").write_text(f"pid={os.getpid()} at=now\n")
+        rc, _, errs = t.run(["--config", str(conf), "refresh", "--background"])
+        t.check(rc == 1 and "a refresh is running already (pid=" in errs, f"one at a time: {errs}")
+        lock.joinpath("owner").unlink()
+        lock.rmdir()
+        rc, _, errs = t.run(["--config", str(conf), "refresh", "fails", "--background"])
+        t.check(rc == 1 and "ended at once [rc 1]: ERROR 09999 [1]: a refresh that fails at once" in errs,
+                f"one that fails at once says why: {errs}")
+    finally:
+        if pid > 0:                 # never 0: killpg(0) is this very process group
+            with contextlib.suppress(OSError):
+                os.killpg(pid, signal.SIGKILL)
 
 
 def t_state(t: T) -> None:
@@ -3306,7 +3554,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
     t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
     t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_fetched, t_refresh_library, t_refresh_since, t_refresh_timeout, t_refresh_all_failed,
-    t_refresh_outdated, t_refresh_lock, t_state, t_install, t_install_snitch, t_test_mail,
+    t_refresh_outdated, t_refresh_lock, t_refresh_status, t_refresh_background, t_state, t_install, t_install_snitch, t_test_mail,
 ]
 
 
