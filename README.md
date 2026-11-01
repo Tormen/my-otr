@@ -205,7 +205,8 @@ Usage
     CONFIG  KEY="value" lines, read and never run -- the first found of
       $MY_OTR_CONFIG, --config <FILE>,
       /LINKS/default/my-otr.conf, /LINKS/default/my-otr, ~/.my-otr.conf, /etc/my-otr.conf, /usr/local/etc/my-otr.conf
-      A <FILE>.GLOBAL beside it is read first, the file itself on top.
+      A <FILE>.GLOBAL beside it is read first, the file itself on top -- in
+      /LINKS/default, the one linked into global/ first, whichever name it has.
 
     EXAMPLES
       my-otr search "bares fuer rares" @zdf '>2026-02-28' @15:05

@@ -221,7 +221,8 @@ DEFAULT_CONFIG: Final = '''\
 ## my-otr.conf -- KEY="value" lines. my-otr READS this file, it never runs it:
 ## no commands, no functions; $NAME and ${NAME} expand a key set above, or
 ## the environment. Searched, first found wins (my-otr --help); a <FILE>.GLOBAL
-## beside the one found is read first, the file itself on top.
+## beside the one found is read first, the file itself on top -- in the farm, the
+## file linked into global/ first, whichever name it has.
 
 ## otr.datenkeller.net -- search and download
 ## (the API key: Login -> Settings -> "API Key anzeigen")
@@ -356,6 +357,21 @@ def config_search_paths() -> List[Path]:
             Path("/etc") / f"{SCRIPT_NAME}.conf", Path("/usr/local/etc") / f"{SCRIPT_NAME}.conf"]
 
 
+def config_layers(found: Path) -> List[Path]:
+    """The files read for the config FOUND, in order: those linked into a global/
+    tree first, the rest on top. The candidates are FOUND and <FOUND>.GLOBAL -- in
+    the site directory, both spellings of each. The farm links the global file as
+    <name>.GLOBAL, or under the plain name while the two trees are named apart, so
+    only where a link points tells global from local."""
+    site = Path(os.environ.get("LINKS", "/LINKS")) / "default"
+    names = [SCRIPT_NAME, f"{SCRIPT_NAME}.conf"] if found.parent == site else [found.name]
+    files = [found.parent / f"{n}{g}" for n in names for g in (".GLOBAL", "")]
+
+    def local(p: Path) -> bool:
+        return not (p.is_symlink() and "global" in Path(os.readlink(p)).parts)
+    return sorted((p for p in files if p.is_file()), key=local)
+
+
 def config_offer() -> List[str]:
     """Where to write a config, most common place first -- a FILTER of the
     search list, so it never names a place that is not read."""
@@ -465,7 +481,7 @@ def _words(value: str, key: str, where: str) -> Tuple[str, ...]:
 
 
 def load_settings(override: Optional[str]) -> Settings:
-    """The config: the defaults, then <FILE>.GLOBAL, then <FILE> on top."""
+    """The config: the defaults, then its global file, then the local one on top."""
     phase("reading the config")
     names: Dict[str, str] = {}
     defaults = read_config_text(DEFAULT_CONFIG, "the built-in defaults", names)
@@ -481,7 +497,7 @@ def load_settings(override: Optional[str]) -> Settings:
             err("00013", f"no config found -- write one, most common place first:\n{lines}\n"
                          f"    ({SCRIPT_NAME} --help lists every place it is looked for)")
         found = hits[0]
-    files = [p for p in (found.with_name(found.name + ".GLOBAL"), found) if p.is_file()]
+    files = config_layers(found)
     for p in files:
         try:
             text = p.read_text(encoding="utf-8")
@@ -2384,7 +2400,8 @@ OPTIONS
 CONFIG  KEY="value" lines, read and never run -- the first found of
   $MY_OTR_CONFIG, --config <FILE>,
   {', '.join(str(p).replace(str(Path.home()), "~", 1) for p in config_search_paths())}
-  A <FILE>.GLOBAL beside it is read first, the file itself on top.
+  A <FILE>.GLOBAL beside it is read first, the file itself on top -- in
+  /LINKS/default, the one linked into global/ first, whichever name it has.
 
 EXAMPLES
   {SCRIPT_NAME} search "bares fuer rares" @zdf '>2026-02-28' @15:05
@@ -2968,6 +2985,34 @@ def t_config_read_never_run(t: T) -> None:
     (t.dir / "c.conf.GLOBAL").write_text('OTR_LOGIN="g"\nOTR_PASSW="gp"\n', encoding="utf-8")
     s, _ = load('OTR_PASSW="local"\n')
     t.check(s is not None and s.otr_login == "g" and s.otr_passw == "local", "<FILE>.GLOBAL first, <FILE> on top")
+    links = t.dir / "links"
+    gdir, ldir, farm = links / "global/etc/default", links / "local/etc/default", links / "default"
+    for d in (gdir, ldir, farm):
+        d.mkdir(parents=True)
+    (gdir / "my-otr").write_text('OTR_LOGIN="g"\nOTR_PASSW="gp"\n', encoding="utf-8")
+    (ldir / "my-otr.conf").write_text('OTR_PASSW="local"\n', encoding="utf-8")
+    os.symlink("../global/etc/default/my-otr", farm / "my-otr")
+    os.symlink("../local/etc/default/my-otr.conf", farm / "my-otr.conf")
+    saved = {k: os.environ.get(k) for k in ("LINKS", "MY_OTR_CONFIG")}
+    os.environ["LINKS"] = str(links)
+    os.environ.pop("MY_OTR_CONFIG", None)
+    try:
+        layers = config_layers(farm / "my-otr.conf")
+        t.check(layers == [farm / "my-otr", farm / "my-otr.conf"],
+                f"the farm's global file under the PLAIN name is read first, the local .conf on top: {layers}")
+        (farm / "my-otr").unlink()
+        (farm / "my-otr.conf").unlink()
+        os.symlink("../local/etc/default/my-otr.conf", farm / "my-otr")
+        os.symlink("../global/etc/default/my-otr", farm / "my-otr.conf")
+        layers = config_layers(farm / "my-otr.conf")
+        t.check(layers == [farm / "my-otr.conf", farm / "my-otr"],
+                f"... by where the link points, never by the name: {layers}")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def t_create_config(t: T) -> None:
