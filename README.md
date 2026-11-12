@@ -49,12 +49,8 @@ as `search`, shows what the search finds now, and adds one `record` line to
 `RECORDINGS_FILE` (default `~/.my-otr.recordings`; an editor is as good -- the
 file explains itself), the folder and the title always in `''`. FOLDER is
 absolute, or below `LIBRARY_DIR`. The lines are a file of their own, not part
-of the config: the config under `/LINKS/default` is root's, while `record` runs
-as you and must be able to write them.
-
-The recordings are a file of their own, not lines in the config: the config
-under `/LINKS/default` is root's, while `record` runs as you and must be able
-to write its lines.
+of the config: a site's config is often root's, while `record` runs as you and
+must be able to write them.
 
     my-otr record 'series/bares/' 'bares fuer rares' @zdf '>8d' @15:05        # every day it is on
     my-otr record 'series/heute/' 'heute show' @zdf '>7d' --max 2             # weekly, 2 at most
@@ -203,10 +199,14 @@ Usage
 
 
     CONFIG  KEY="value" lines, read and never run -- the first found of
-      $MY_OTR_CONFIG, --config <FILE>,
-      /LINKS/default/my-otr.conf, /LINKS/default/my-otr, ~/.my-otr.conf, /etc/my-otr.conf, /usr/local/etc/my-otr.conf
+      $MY_OTR_CONFIG, --config <FILE>, $CONFIG_SEARCH_DIR/my-otr.conf,
+      then $CONFIG_SEARCH_DIR/my-otr, ~/.my-otr.conf,
+      /etc/my-otr.conf, /usr/local/etc/my-otr.conf
       A <FILE>.GLOBAL beside it is read first, the file itself on top -- in
-      /LINKS/default, the one linked into global/ first, whichever name it has.
+      $CONFIG_SEARCH_DIR, the one linked into a global/ tree first, whichever
+      name it has. /LINKS/default/site.conf, when there, is read first: the
+      site's CONFIG_SEARCH_DIR, and LOG_BASE_DIR, under which LOGFILE's default
+      lies (/var/log without the file). There but unreadable: an error.
 
     EXAMPLES
       my-otr search "bares fuer rares" @zdf '>2026-02-28' @15:05
