@@ -368,18 +368,29 @@ class Site:
     config_offer_note: str = ""
 
 
+# python: the text, or None when plainly not there; anything else raises OSError
+def site_conf_text(path: str) -> str | None:
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except FileNotFoundError:
+        if os.path.lexists(path):
+            raise                                # a link to nothing
+        return None
+
+
 def read_site() -> Site:
     """The site file, read before the config: plain KEY="value" lines, parsed
     and never run, a $ in none of them. Not there: the neutral values. There
     but unreadable: an error -- the neutral values would put this user's log
     apart from everyone else's. Never the environment: a LaunchDaemon, sudo
     and a login shell would each see different values."""
-    if not _site_conf.exists():
-        return Site()
     try:
-        text = _site_conf.read_text(encoding="utf-8")
+        text = site_conf_text(str(_site_conf))
     except OSError as e:
         err("00003", f"cannot read {_site_conf} ({e.strerror}) -- the site's directories for every tool")
+    if text is None:
+        return Site()
     for n, line in enumerate(text.splitlines(), 1):
         if ("$" in line or "`" in line) and not line.strip().startswith("#"):
             err("00004", f"{_site_conf}:{n}: a $ or ` -- the site file holds plain KEY=\"value\" lines, "
@@ -3131,6 +3142,32 @@ def t_site_conf_gives_the_bases_the_search_and_the_offer(t: T) -> None:
         site_file.chmod(0o600)
 
 
+def t_site_conf_there_but_unreadable_is_an_error(t: T) -> None:
+    """A site file behind a folder that cannot be searched, or a link to
+    nothing, is error 00003 -- never the neutral values, which would put this
+    user's log apart from everyone else's; only a file plainly not there gives
+    the neutral values."""
+    global _site_conf
+    shut = t.dir / "shut"
+    shut.mkdir()
+    (shut / "site.conf").write_text('LOG_BASE_DIR="/x"\n')
+    (t.dir / "dangling.conf").symlink_to(t.dir / "nowhere.conf")
+    shut.chmod(0)
+    try:
+        for path, why in ((shut / "site.conf", "behind a mode-000 folder"),
+                          (t.dir / "dangling.conf", "a link to nothing")):
+            _site_conf = path
+            try:
+                got = read_site()
+                t.check(False, f"{why}: no error, the values {got}")
+            except OtrError as e:
+                t.check(e.code == "00003" and str(path) in e.text, f"{why}: {e}")
+    finally:
+        shut.chmod(0o700)
+    _site_conf = t.dir / "absent" / "site.conf"
+    t.check(read_site() == Site(), f"absent: {read_site()}")
+
+
 def t_config_offer_names_only_searched_paths(t: T) -> None:
     """Every offered path is searched, or is the site's offer directory while
     the site's search directory is searched; that search directory, a farm,
@@ -3752,7 +3789,8 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_search_best_quality, t_search_filters, t_search_fails_loud, t_search_key_off_output,
     t_get_name_forms, t_get_downloads_off_argv, t_get_duplicates, t_decode_otr2, t_decode_otr2_wrong_checksum,
     t_decode_otr2_incomplete, t_decode_otrkey, t_get_decodes_what_is_kept, t_config_read_never_run,
-    t_site_conf_gives_the_bases_the_search_and_the_offer, t_config_offer_names_only_searched_paths,
+    t_site_conf_gives_the_bases_the_search_and_the_offer, t_site_conf_there_but_unreadable_is_an_error,
+    t_config_offer_names_only_searched_paths,
     t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
     t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_fetched, t_refresh_library, t_refresh_since, t_refresh_timeout, t_refresh_all_failed,
     t_refresh_outdated, t_refresh_lock, t_refresh_status, t_refresh_background, t_state, t_install, t_install_snitch, t_test_mail,
