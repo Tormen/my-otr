@@ -3362,15 +3362,16 @@ def t_relative_date(t: T) -> None:
 
 
 def t_record_lines(t: T) -> None:
+    soon = (datetime.date.today() + datetime.timedelta(days=60)).isoformat()   # never outdated, whatever today is
     rec = (RECORDINGS_HEAD + "record shows/a/ 'alpha three' @zdf '>1d' --max 2\n"
-           f"record {t.dir}/films/ beta @ard @2026-11-03 @20:15\n"
+           f"record {t.dir}/films/ beta @ard @{soon} @20:15\n"
            "record old/ gamma @ard @2020-01-01   # a comment\n"
            "record \"it's/\" \"rock'n roll\" @zdf\n\n")
     conf = _t_rec_config(t, rec)
     rc, out, errs = t.run(["--config", str(conf), "list"])
     lines = out.splitlines()
     t.check(rc == 0 and lines[0] == "record 'shows/a/' 'alpha three' @zdf '>1d' --max 2", f"a relative folder: {out}")
-    t.check(lines[1] == f"record '{t.dir}/films/' 'beta' @ard @2026-11-03 @20:15", f"an absolute folder: {lines[1]}")
+    t.check(lines[1] == f"record '{t.dir}/films/' 'beta' @ard @{soon} @20:15", f"an absolute folder: {lines[1]}")
     back = [w for w in shlex.split(lines[-1])]
     t.check(back == ["record", "it's/", "rock'n roll", "@zdf"], f"a ' inside the folder and title: {lines[-1]} -> {back}")
     t.check(lines[2].endswith("outdated -- please check/remove") and "1 outdated" in errs, f"outdated marked: {out}")
