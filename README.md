@@ -87,7 +87,8 @@ must be able to write them.
 - A one-off more than `PAST_AFTER_DAYS` (7) after its last day is outdated: no
   longer searched, and named in each run -- "please check/remove". my-otr
   never removes a line itself.
-- `RUN_AFTER_REFRESH`: a command run after each full refresh.
+- `RUN_AFTER_REFRESH`: a command (or commands joined by `&&`) run after
+  `refresh` when at least one new recording was fetched.
 - `my-otr list` shows the lines; bare `my-otr` the state -- the recordings,
   the nightly job, the last run.
 - `my-otr --install` (root) writes the LaunchDaemon: daily at `RUN_AT` as

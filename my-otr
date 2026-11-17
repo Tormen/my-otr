@@ -283,7 +283,8 @@ PAST_AFTER_DAYS="7"
 ## a command for the failure mail, given the subject and the body as two
 ## more arguments ("": no mail), e.g. "my-notify --mail"
 FAIL_MAIL_CMD=""
-## a command run after every full refresh (not --dry-run, not one recording)
+## a command (or commands joined by &&) run after refresh when at least one
+## new recording was fetched (not --dry-run, not when nothing was fetched)
 RUN_AFTER_REFRESH=""
 
 ## --- --install: the nightly LaunchDaemon (root) --------------------------
@@ -336,7 +337,7 @@ class Settings:
     get_timeout: int
     past_after_days: int
     fail_mail_cmd: Tuple[str, ...]
-    run_after_refresh: Tuple[str, ...]
+    run_after_refresh: Tuple[Tuple[str, ...], ...]
     run_as: str
     run_at: str
     launchd_label: str
@@ -546,6 +547,27 @@ def _words(value: str, key: str, where: str) -> Tuple[str, ...]:
         err("00013", f"{where}: {key}: {e}")
 
 
+def _commands(value: str, key: str, where: str) -> Tuple[Tuple[str, ...], ...]:
+    """One command, or several joined by && -- parsed with shlex, never run by a shell."""
+    words = _words(value, key, where)
+    if not words:
+        return ()
+    cmds: List[Tuple[str, ...]] = []
+    cur: List[str] = []
+    for w in words:
+        if w != "&&":
+            cur.append(w)
+            continue
+        if not cur:
+            break
+        cmds.append(tuple(cur))
+        cur.clear()
+    if not cur:
+        err("00014", f"{where}: {key}: empty command around '&&'")
+    cmds.append(tuple(cur))
+    return tuple(cmds)
+
+
 def load_settings(override: Optional[str]) -> Settings:
     """The config: the defaults, then its global file, then the local one on top."""
     phase("reading the config")
@@ -556,30 +578,30 @@ def load_settings(override: Optional[str]) -> Settings:
     chosen = override or os.environ.get("MY_OTR_CONFIG")
     if chosen:
         if not Path(chosen).is_file():
-            err("00014", f"config '{chosen}' not found (--config / $MY_OTR_CONFIG)")
+            err("00015", f"config '{chosen}' not found (--config / $MY_OTR_CONFIG)")
         found = Path(chosen)
     else:
         hits = [p for p in config_search_paths(site) if p.is_file()]
         if not hits:
-            err("00015", no_config_offer(site))
+            err("00016", no_config_offer(site))
         found = hits[0]
     files = config_layers(found, site)
     for p in files:
         try:
             text = p.read_text(encoding="utf-8")
         except OSError as e:
-            err("00016", f"cannot read the config {p}: {e.strerror}")
+            err("00017", f"cannot read the config {p}: {e.strerror}")
         for key in read_config_text(text, str(p), names):
             if key not in defaults:
                 OUT.warn(f"{p}: {key} is not a my-otr setting -- ignored ('{SCRIPT_NAME} --create-config' lists them)")
     where = " + ".join(str(p) for p in files)
     cap = names["OTR_QUALITY_CAP"]
     if cap not in ("HQ", "HD"):
-        err("00017", f"{where}: OTR_QUALITY_CAP=\"{cap}\" -- HQ or HD")
+        err("00018", f"{where}: OTR_QUALITY_CAP=\"{cap}\" -- HQ or HD")
     try:
         dl_params = tuple(shlex.split(names["OTR_DL_CMD_PARAMS"]))
     except ValueError as e:
-        err("00018", f"{where}: OTR_DL_CMD_PARAMS: {e}")
+        err("00019", f"{where}: OTR_DL_CMD_PARAMS: {e}")
     return Settings(
         files=tuple(files),
         datenkeller_login=names["DATENKELLER_LOGIN"], datenkeller_passw=names["DATENKELLER_PASSW"],
@@ -597,7 +619,7 @@ def load_settings(override: Optional[str]) -> Settings:
         get_timeout=_count(names["GET_TIMEOUT"], "GET_TIMEOUT", where),
         past_after_days=_count(names["PAST_AFTER_DAYS"], "PAST_AFTER_DAYS", where),
         fail_mail_cmd=_words(names["FAIL_MAIL_CMD"], "FAIL_MAIL_CMD", where),
-        run_after_refresh=_words(names["RUN_AFTER_REFRESH"], "RUN_AFTER_REFRESH", where),
+        run_after_refresh=_commands(names["RUN_AFTER_REFRESH"], "RUN_AFTER_REFRESH", where),
         run_as=names["RUN_AS"], run_at=names["RUN_AT"], launchd_label=names["LAUNCHD_LABEL"],
         launchd_log=names["LAUNCHD_LOG"], launchd_path=names["LAUNCHD_PATH"], fda_launcher=names["FDA_LAUNCHER"],
         little_snitch=names["LITTLE_SNITCH"])
@@ -662,7 +684,7 @@ def parse_otr_name(name: str) -> Optional[Recording]:
         if hh > 23 or mm > 59:
             raise ValueError(m.group("time"))
     except ValueError:
-        err("00019", f"'{name}': no valid date and time in it")
+        err("00020", f"'{name}': no valid date and time in it")
     return Recording(name, m.group("title"), day, (hh, mm), m.group("channel"),
                      int(m.group("minutes")), _OTR_QUALITY.get(q), "" if q in _OTR_QUALITY else m.group("q"))
 
@@ -766,7 +788,7 @@ def _hhmm(text: str, range_end: bool) -> Tuple[int, int]:
     or :59 as the end of a range."""
     m = re.fullmatch(r"(\d\d)(?:[:h-](\d\d)?)?", text)
     if m is None or int(m.group(1)) > 23 or (m.group(2) and int(m.group(2)) > 59):
-        err("00020", f"'{text}' is not a time -- HH, HHh, HH:MM")
+        err("00021", f"'{text}' is not a time -- HH, HHh, HH:MM")
     minute = int(m.group(2)) if m.group(2) else (59 if range_end else 0)
     return int(m.group(1)), minute
 
@@ -776,27 +798,27 @@ def parse_filters(args: Sequence[str]) -> Filters:
     day_at: Optional[datetime.date] = None
     for a in args:
         if a == ",":
-            err("00021", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's search answers "
+            err("00022", "a DESCRIPTION search (after ',') is not possible: otr.datenkeller.net's search answers "
                          "file names only, and its EPG info at most the show's general description -- never "
                          "what an episode is about")
         if re.fullmatch(r">\d{1,3}d", a):          # since N days ago: a recurring recording
             if f.day_from:
-                err("00022", f"'{a}': one >DATE only")
+                err("00023", f"'{a}': one >DATE only")
             f.day_from = datetime.date.today() - datetime.timedelta(days=int(a[1:-1]))
         elif re.fullmatch(r"[@<>]\d{4}-\d\d-\d\d", a):
             try:
                 day = datetime.date.fromisoformat(a[1:])
             except ValueError:
-                err("00023", f"'{a}': no such date")
+                err("00024", f"'{a}': no such date")
             if a[0] == "@":
                 day_at = day
             elif a[0] == ">":
                 if f.day_from:
-                    err("00024", f"'{a}': one >DATE only")
+                    err("00025", f"'{a}': one >DATE only")
                 f.day_from = day
             else:
                 if f.day_till:
-                    err("00025", f"'{a}': one <DATE only")
+                    err("00026", f"'{a}': one <DATE only")
                 f.day_till = day
         elif re.fullmatch(r"[@<>]\d\d(?:[:h-]\d\d|[:h])", a):
             if a[0] == "@":
@@ -818,15 +840,15 @@ def parse_filters(args: Sequence[str]) -> Filters:
         elif a.startswith("@") and len(a) > 1:
             f.channels.append(a[1:].lower())
         elif a[:1] in ("<", ">"):
-            err("00026", f"'{a}' is no filter ({SCRIPT_NAME} --help lists them)")
+            err("00027", f"'{a}' is no filter ({SCRIPT_NAME} --help lists them)")
         else:
             f.title.append(a)
     if day_at:
         if f.day_from or f.day_till:
-            err("00027", "@DATE together with <DATE or >DATE -- one or the other")
+            err("00028", "@DATE together with <DATE or >DATE -- one or the other")
         f.day_from = f.day_till = day_at
     if not f.title:
-        err("00028", "search needs a TITLE (what you would type into otr.datenkeller.net's search box)")
+        err("00029", "search needs a TITLE (what you would type into otr.datenkeller.net's search box)")
     return f
 
 
@@ -850,7 +872,7 @@ def pick_best(answer: str, filters: Filters, cap: QualityCap) -> Tuple[List[Reco
         offered += 1
         rec = parse_otr_name(name)
         if rec is None:
-            err("00029", f"otr.datenkeller.net answered a line that is no OTR file (line {n}): {line[:100]}")
+            err("00030", f"otr.datenkeller.net answered a line that is no OTR file (line {n}): {line[:100]}")
         if rec.unknown:
             unknown.setdefault(rec.unknown, []).append(name)
         elif rec.quality is None:
@@ -885,16 +907,16 @@ class Reply:
         try:
             data: object = json.loads(self.body)
         except ValueError:
-            err("00030", f"{what}: no JSON in the answer [HTTP {self.status}]: {self.text()[:120]}")
+            err("00031", f"{what}: no JSON in the answer [HTTP {self.status}]: {self.text()[:120]}")
         if not isinstance(data, dict):
-            err("00031", f"{what}: the answer is no JSON object [HTTP {self.status}]")
+            err("00032", f"{what}: the answer is no JSON object [HTTP {self.status}]")
         return cast(Dict[str, object], data)
 
 
 def field_str(obj: Dict[str, object], key: str, what: str) -> str:
     v = obj.get(key)
     if not isinstance(v, str) or not v:
-        err("00032", f"{what}: the answer has no '{key}'")
+        err("00033", f"{what}: the answer has no '{key}'")
     return v
 
 
@@ -932,7 +954,7 @@ def fetch(method: str, url: str, *, json_body: Optional[Dict[str, str]] = None,
     try:
         reply = (via or _transport)(urllib.request.Request(url, data=body, headers=head, method=method), timeout)
     except (urllib.error.URLError, OSError) as e:
-        err("00033", f"{method} {urllib.parse.urlsplit(url).netloc}: no answer "
+        err("00034", f"{method} {urllib.parse.urlsplit(url).netloc}: no answer "
                      f"({getattr(e, 'reason', None) or e}) -- is the network up?")
     OUT.dbg(f"HTTP {reply.status}, {len(reply.body)} bytes")
     return reply
@@ -948,7 +970,7 @@ def datenkeller_api(s: Settings, query: str) -> str:
     url = f"{DK_SITE}/?jdlAPI&account={urllib.parse.quote(s.secret('DATENKELLER_LOGIN'))}&apikey={key}&{query}"
     reply = fetch("GET", url)
     if reply.status >= 400:
-        err("00034", f"otr.datenkeller.net: HTTP {reply.status} for {shown_url(url)}")
+        err("00035", f"otr.datenkeller.net: HTTP {reply.status} for {shown_url(url)}")
     return reply.text()
 
 
@@ -978,7 +1000,7 @@ def datenkeller_login(s: Settings, force: bool) -> None:
                         ("xjxargs[]", "S" + s.secret("DATENKELLER_PASSW")),
                         ("xjxargs[]", "Se64182db4a8ab14dcaf986037092f6c0")])
     if reply.status >= 400:
-        err("00035", f"otr.datenkeller.net login: HTTP {reply.status}")
+        err("00036", f"otr.datenkeller.net login: HTTP {reply.status}")
     old = os.umask(0o077)
     try:
         jar.save(ignore_discard=True)
@@ -999,7 +1021,7 @@ def name_of_line(line: str) -> str:
     for c in cands:
         if parse_otr_name(c) is not None:
             return c
-    err("00036", f"not an OTR file name, nor a URL of one: {s[:120]}")
+    err("00037", f"not an OTR file name, nor a URL of one: {s[:120]}")
 
 
 def download_link(s: Settings, name: str) -> str:
@@ -1007,7 +1029,7 @@ def download_link(s: Settings, name: str) -> str:
     answer = datenkeller_api(s, "getLinkFor=" + urllib.parse.quote(name))
     m = re.search(r"^OK: (\S+)", answer, re.MULTILINE)
     if m is None:
-        err("00037", f"otr.datenkeller.net gave no download link for {name}: {answer.strip()[:160]}")
+        err("00038", f"otr.datenkeller.net gave no download link for {name}: {answer.strip()[:160]}")
     return m.group(1)
 
 
@@ -1028,7 +1050,7 @@ def aria2c(s: Settings, url: str, name: str, folder: Path) -> None:
     phase(f"downloading {name}")
     exe = shutil.which(s.dl_cmd)
     if exe is None:
-        err("00038", f"OTR_DL_CMD '{s.dl_cmd}' not found")
+        err("00039", f"OTR_DL_CMD '{s.dl_cmd}' not found")
     cmd = [exe, *ARIA2C_OPTIONS, *s.dl_params, "--input-file=-"]
     OUT.det(f" >>> {shlex.join(cmd)}   (stdin: the URL, out={name})")
     # its output goes into the record, under this download (#57)
@@ -1043,9 +1065,9 @@ def aria2c(s: Settings, url: str, name: str, folder: Path) -> None:
     rc = p.wait()
     target = folder / name
     if rc != 0:
-        err("00039", f"{Path(exe).name} failed [rc {rc}] on {name}")
+        err("00040", f"{Path(exe).name} failed [rc {rc}] on {name}")
     if not target.is_file() or target.stat().st_size == 0 or unfinished(target):
-        err("00040", f"{Path(exe).name} ended [rc 0], but {target} is not complete")
+        err("00041", f"{Path(exe).name} ended [rc 0], but {target} is not complete")
 
 
 # --- 5. the OTR protocol ---------------------------------------------------
@@ -1143,26 +1165,26 @@ def read_otr2_header(path: Path) -> Otr2Header:
     with path.open("rb") as f:
         pre = f.read(OTR2_PREAMBLE)
         if len(pre) < OTR2_PREAMBLE or pre[:8] != OTR2_MAGIC:
-            err("00041", f"{path.name}: not an .otr2 file ({len(pre)} bytes of preamble) -- a broken download?")
+            err("00042", f"{path.name}: not an .otr2 file ({len(pre)} bytes of preamble) -- a broken download?")
         version, hlen = int.from_bytes(pre[8:10], "little"), int.from_bytes(pre[12:16], "little")
         if version != 1 or not 0 < hlen <= 64 * 1024:
-            err("00042", f"{path.name}: .otr2 version {version}, header {hlen} bytes -- not one my-otr knows")
+            err("00043", f"{path.name}: .otr2 version {version}, header {hlen} bytes -- not one my-otr knows")
         try:
             raw: object = json.loads(f.read(hlen))
         except ValueError:
-            err("00043", f"{path.name}: the .otr2 header is no JSON")
+            err("00044", f"{path.name}: the .otr2 header is no JSON")
     if not isinstance(raw, dict):
-        err("00044", f"{path.name}: the .otr2 header is no JSON object")
+        err("00045", f"{path.name}: the .otr2 header is no JSON object")
     h = cast(Dict[str, object], raw)
     scheme, iv, size, ctype = h.get("scheme", OTR2_SCHEME), h.get("iv"), h.get("size", 0), h.get("content_type")
     if scheme != OTR2_SCHEME or not isinstance(iv, str) or not isinstance(size, int):
-        err("00045", f"{path.name}: .otr2 scheme {scheme!r} -- my-otr knows {OTR2_SCHEME}")
+        err("00046", f"{path.name}: .otr2 scheme {scheme!r} -- my-otr knows {OTR2_SCHEME}")
     try:
         nonce = bytes.fromhex(iv)
     except ValueError:
         nonce = b""
     if len(nonce) != 12:
-        err("00046", f"{path.name}: the .otr2 IV is not 12 bytes")
+        err("00047", f"{path.name}: the .otr2 IV is not 12 bytes")
     raw_end = OTR2_PREAMBLE + hlen
     return Otr2Header(field_str(h, "rec", path.name), nonce, size,
                       ctype if isinstance(ctype, str) else "video/mp4", raw_end + (-raw_end) % OTR2_ALIGN)
@@ -1197,14 +1219,14 @@ class OtrSession:
             r = fetch("POST", f"{OTR_API}/api/auth/login",
                       json_body={"email": self._s.secret("OTR_LOGIN"), "password": self._s.secret("OTR_PASSW")})
             if r.status == 401:
-                err("00047", "onlinetvrecorder.com refused the login -- check OTR_LOGIN / OTR_PASSW")
+                err("00048", "onlinetvrecorder.com refused the login -- check OTR_LOGIN / OTR_PASSW")
             if r.status >= 400:
-                err("00048", f"onlinetvrecorder.com login: HTTP {r.status}: {_otr_reason(r)}")
+                err("00049", f"onlinetvrecorder.com login: HTTP {r.status}: {_otr_reason(r)}")
             self._jwt = field_str(r.obj("the OTR login"), "token", "the OTR login")
         if self._ticket is None or time.time() > self._ticket_exp - 30:
             r = fetch("GET", f"{OTR_API}/api/otr2/ticket", headers={"Authorization": f"Bearer {self._jwt}"})
             if r.status >= 400:
-                err("00049", f"onlinetvrecorder.com ticket: HTTP {r.status}: {_otr_reason(r)}")
+                err("00050", f"onlinetvrecorder.com ticket: HTTP {r.status}: {_otr_reason(r)}")
             obj = r.obj("the OTR ticket")
             exp = obj.get("exp")
             self._ticket = field_str(obj, "ticket", "the OTR ticket")
@@ -1221,11 +1243,11 @@ class OtrSession:
             serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
         r = fetch("POST", f"{OTR_KEYS}/key", json_body={"rec": rec, "token": self._ticket_now(), "client_pub": pub})
         if r.status == 403:
-            err("00050", f"onlinetvrecorder.com: no right to recording {rec}: {_otr_reason(r)}")
+            err("00051", f"onlinetvrecorder.com: no right to recording {rec}: {_otr_reason(r)}")
         if r.status == 404:
-            err("00051", f"onlinetvrecorder.com: recording {rec} is not on the key server")
+            err("00052", f"onlinetvrecorder.com: recording {rec} is not on the key server")
         if r.status >= 400:
-            err("00052", f"onlinetvrecorder.com key: HTTP {r.status}: {_otr_reason(r)}")
+            err("00053", f"onlinetvrecorder.com key: HTTP {r.status}: {_otr_reason(r)}")
         obj = r.obj("the OTR key")
         try:
             # ECIES: the server's ephemeral P-256 point (65) | nonce (12) | AES-GCM of the key
@@ -1235,7 +1257,7 @@ class OtrSession:
                 self._priv.exchange(ec.ECDH(), eph))
             cek = AESGCM(kek).decrypt(wrapped[65:77], wrapped[77:], None)
         except (ValueError, TypeError) as e:
-            err("00053", f"onlinetvrecorder.com: the key of {rec} cannot be unwrapped ({type(e).__name__})")
+            err("00054", f"onlinetvrecorder.com: the key of {rec} cannot be unwrapped ({type(e).__name__})")
         sha = obj.get("plaintext_sha256")
         return cek, (sha.lower() if isinstance(sha, str) and sha else None)
 
@@ -1244,11 +1266,11 @@ class OtrSession:
                                             ("password", self._s.secret("OTR_PASSW")), ("FN", fn), ("OH", oh)])
         obj = r.obj("the .otrkey key service")
         if "error" in obj:
-            err("00054", f"onlinetvrecorder.com refused the key of {fn}: {obj.get('message') or obj['error']}")
+            err("00055", f"onlinetvrecorder.com refused the key of {fn}: {obj.get('message') or obj['error']}")
         try:
             return bytes.fromhex(field_str(obj, "random_key", "the .otrkey key service"))
         except ValueError:
-            err("00055", f"onlinetvrecorder.com: the key of {fn} is no hex string")
+            err("00056", f"onlinetvrecorder.com: the key of {fn} is no hex string")
 
 
 def otrkey_fields(path: Path) -> Dict[str, str]:
@@ -1256,7 +1278,7 @@ def otrkey_fields(path: Path) -> Dict[str, str]:
     with path.open("rb") as f:
         head = f.read(len(OTRKEY_MAGIC) + OTRKEY_HEADER)
     if len(head) < len(OTRKEY_MAGIC) + OTRKEY_HEADER or not head.startswith(OTRKEY_MAGIC):
-        err("00056", f"{path.name}: not an .otrkey file -- a broken download?")
+        err("00057", f"{path.name}: not an .otrkey file -- a broken download?")
     text = OtrBlowfish(OTRKEY_HEADER_KEY).decrypt(head[len(OTRKEY_MAGIC):]).split(b"\0", 1)[0]
     return dict(p.split("=", 1) for p in text.decode("latin-1").split("&") if "=" in p)
 
@@ -1293,7 +1315,7 @@ def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
     have, want = path.stat().st_size, h.body_offset + h.size
     if h.size and have < want:
         # before the key is asked for: every key OTR hands out counts as a decode
-        err("00057", f"{path.name}: incomplete download ({have} of {want} bytes) -- no key asked for")
+        err("00058", f"{path.name}: incomplete download ({have} of {want} bytes) -- no key asked for")
     cek, sha_want = session.otr2_key(h.rec)
     dec = Cipher(algorithms.AES(cek), modes.CTR(h.nonce + b"\0\0\0\0")).decryptor()
     sha, done = hashlib.sha256(), 0
@@ -1310,11 +1332,11 @@ def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
         dst.flush()
         os.fsync(dst.fileno())
     if h.size and done != h.size:
-        err("00058", f"{path.name}: {done} of {h.size} bytes decoded")
+        err("00059", f"{path.name}: {done} of {h.size} bytes decoded")
     if sha_want is None:
         return f"{done} bytes, OTR sent no checksum"
     if sha.hexdigest() != sha_want:
-        err("00059", f"{path.name}: the decoded content differs from the recording "
+        err("00060", f"{path.name}: the decoded content differs from the recording "
                      f"(sha256 {sha.hexdigest()[:12]} != OTR's {sha_want[:12]}) -- the source is kept")
     return f"sha256 {sha_want[:12]} = OTR's"
 
@@ -1322,7 +1344,7 @@ def _decode_otr2(session: OtrSession, path: Path, part: Path) -> str:
 def _decode_otrkey(session: OtrSession, path: Path, part: Path) -> str:
     fields = otrkey_fields(path)
     if not fields.get("OH"):
-        err("00060", f"{path.name}: the .otrkey header has no OH")
+        err("00061", f"{path.name}: the .otrkey header has no OH")
     bf = OtrBlowfish(session.otrkey_key(fields.get("FN", path.name), fields["OH"]))
     done = 0
     with path.open("rb") as src, part.open("wb") as dst:
@@ -1345,7 +1367,7 @@ def update_check(zip_path: Path) -> int:
         with zipfile.ZipFile(zip_path) as z:
             files = {Path(n).name: z.read(n) for n in z.namelist() if n.endswith(".py")}
     except (OSError, zipfile.BadZipFile) as e:
-        err("00061", f"{zip_path}: not a readable zip ({e})")
+        err("00062", f"{zip_path}: not a readable zip ({e})")
     source = b"\n".join(files.values()).decode("utf-8", "replace")
     m = re.search(r"__version__ = '([^']+)'", source)
     OUT.result(f" >>> OTR's decoder {m.group(1) if m else '(no __version__)'}, against the reviewed {REFERENCE_RELEASE}:")
@@ -1373,7 +1395,7 @@ def cmd_search(s: Settings, args: Sequence[str]) -> int:
     OUT.msg(f" >>> searching otr.datenkeller.net for \"{title}\"")
     answer = datenkeller_api(s, f"suche={urllib.parse.quote(title)}&details&limit=-1")
     if not answer.strip():
-        err("00062", f"otr.datenkeller.net answered nothing for \"{title}\"")
+        err("00063", f"otr.datenkeller.net answered nothing for \"{title}\"")
     best, offered = pick_best(answer, filters, s.quality_cap)
     for rec in best:
         OUT.result(rec.name)
@@ -1430,7 +1452,7 @@ def cmd_get(s: Settings, decode: bool, force: bool) -> int:
             + (f"{t.decoded} decoded" if decode else "none decoded (dl)")
             + (f", {len(t.failed)} FAILED" if t.failed else ""))
     if t.failed:
-        err("00063", f"{len(t.failed)} failed: " + ", ".join(t.failed))
+        err("00064", f"{len(t.failed)} failed: " + ", ".join(t.failed))
     return 0
 
 
@@ -1449,7 +1471,7 @@ def decode_all(s: Settings, files: Sequence[Path], outdir: Path, force: bool, t:
     for path in files:
         try:
             if not path.is_file():
-                err("00064", f"{path}: no such file")
+                err("00065", f"{path}: no such file")
             out = outdir / decoded_name(path)
             if out.exists() and not force:
                 OUT.msg(f"    > {path.name}: decoded already as {out.name} -- left as it is (-F decodes again)")
@@ -1477,13 +1499,13 @@ def cmd_decode(s: Settings, args: Sequence[str], force: bool) -> int:
         OUT.msg(f" >>> writing into {outdir} (DEFAULT_DECODE_OUTP_DIR)")
         outdir.mkdir(parents=True, exist_ok=True)
     else:
-        err("00065", "decode: no <DIR> given, and DEFAULT_DECODE_OUTP_DIR is not set")
+        err("00066", "decode: no <DIR> given, and DEFAULT_DECODE_OUTP_DIR is not set")
     if not items:
-        err("00066", "decode: no file given")
+        err("00067", "decode: no file given")
     t = Tally(read=len(items))
     decode_all(s, [Path(i) for i in items], outdir, force, t)
     if t.failed:
-        err("00067", f"{len(t.failed)} of {t.read} failed: " + ", ".join(t.failed))
+        err("00068", f"{len(t.failed)} of {t.read} failed: " + ", ".join(t.failed))
     return 0
 
 
@@ -1555,19 +1577,19 @@ def parse_record(s: Settings, words: Sequence[str], where: str) -> Programmed:
         if key == "--max":
             v = val if eq else next(it, "")
             if not re.fullmatch(r"[1-9]\d*", v):
-                err("00068", f"{where}: --max '{v}' -- a number, 1 or more")
+                err("00069", f"{where}: --max '{v}' -- a number, 1 or more")
             most = int(v)
         else:
             rest.append(w)
     if len(rest) < 2:
-        err("00069", f"{where}: record <FOLDER> <TITLE> [<FILTER>..] [--max <N>] -- {shlex.join(words)[:80]}")
+        err("00070", f"{where}: record <FOLDER> <TITLE> [<FILTER>..] [--max <N>] -- {shlex.join(words)[:80]}")
     folder_text, search = rest[0], tuple(rest[1:])
     if folder_text.startswith("/"):
         folder = Path(folder_text)
     elif s.library_dir:
         folder = Path(s.library_dir).expanduser() / folder_text
     else:
-        err("00070", f"{where}: '{folder_text}' is relative, and LIBRARY_DIR is not set -- an absolute folder, or set it")
+        err("00071", f"{where}: '{folder_text}' is relative, and LIBRARY_DIR is not set -- an absolute folder, or set it")
     try:
         filters = parse_filters(search)
     except OtrError as e:
@@ -1582,18 +1604,18 @@ def read_recordings(s: Settings) -> List[Programmed]:
     except FileNotFoundError:
         return []
     except OSError as e:
-        err("00071", f"cannot read RECORDINGS_FILE {s.recordings_file}: {e.strerror}")
+        err("00072", f"cannot read RECORDINGS_FILE {s.recordings_file}: {e.strerror}")
     found: List[Programmed] = []
     for n, raw in enumerate(text.splitlines(), 1):
         where = f"{s.recordings_file}:{n}"
         try:
             words = shlex.split(raw, comments=True)
         except ValueError as e:
-            err("00072", f"{where}: {e}")
+            err("00073", f"{where}: {e}")
         if not words:
             continue
         if words[0] != "record":
-            err("00073", f"{where}: not a `record` line -- {raw.strip()[:80]}")
+            err("00074", f"{where}: not a `record` line -- {raw.strip()[:80]}")
         found.append(parse_record(s, words[1:], where))
     return found
 
@@ -1625,7 +1647,7 @@ def recordings_lock(s: Settings) -> Generator[None, None, None]:
         except FileExistsError:
             owner, held = lock_owner(lock)
             if held:
-                err("00074", f"another my-otr is refreshing or recording ({owner}): "
+                err("00075", f"another my-otr is refreshing or recording ({owner}): "
                              f"{lock} -- run again when it is done")
             OUT.msg(f" >>> breaking a stale lock: its owner is gone ({owner})")
             with contextlib.suppress(OSError):
@@ -1683,6 +1705,14 @@ def here_already(s: Settings, name: str, folder: Path) -> bool:
     return as_good_here(rec, rec.quality, folder, s.quality_cap) is not None
 
 
+def decoded_here(name: str, folder: Path) -> bool:
+    """A decoded copy of NAME in FOLDER (never an undecoded .otr2 / .otrkey)."""
+    rec = parse_otr_name(name)
+    if rec is None or not folder.is_dir():
+        return False
+    return any(not p.name.lower().endswith((".otr2", ".otrkey")) for p, _ in copies_here(rec, folder))
+
+
 def library_slots(s: Settings, recs: Sequence["Programmed"]) -> Set[str]:
     """The OTR slot of every finished file below LIBRARY_DIR and each absolute
     record folder: a recording is in the library wherever it was moved and
@@ -1723,7 +1753,7 @@ def fetched_before(s: Settings) -> Set[str]:
     except FileNotFoundError:
         return set()
     except OSError as e:
-        err("00075", f"cannot read {fetched_file(s)}: {e.strerror}")
+        err("00076", f"cannot read {fetched_file(s)}: {e.strerror}")
     return {m for m in map(slot_mark, text.splitlines()) if m}
 
 
@@ -1740,7 +1770,7 @@ def note_fetched(s: Settings, names: Sequence[str], known: Set[str]) -> None:
         tmp.write_text(old + "".join(n + "\n" for n in new), encoding="utf-8")
         tmp.replace(p)
     except OSError as e:
-        err("00076", f"cannot write {p}: {e.strerror} -- what was fetched would be fetched again")
+        err("00077", f"cannot write {p}: {e.strerror} -- what was fetched would be fetched again")
     known.update(slot_mark(n) for n in new)
 
 
@@ -1853,7 +1883,7 @@ def mail_failure(s: Settings, text: str) -> None:
 
 def cmd_test_mail(s: Settings) -> int:
     if not s.fail_mail_cmd:
-        err("00077", "--test-mail: FAIL_MAIL_CMD is not set -- no failure mail would go out")
+        err("00078", "--test-mail: FAIL_MAIL_CMD is not set -- no failure mail would go out")
     host = socket.gethostname().split(".")[0]
     rc = subprocess.run([*s.fail_mail_cmd, f"{SCRIPT_NAME}: test mail from {host}",
                          f"Test mail: a failed {SCRIPT_NAME} refresh is mailed through this same path.\n\n"
@@ -1861,7 +1891,7 @@ def cmd_test_mail(s: Settings) -> int:
                          f"config: {' + '.join(str(p) for p in s.files) or 'none'}\nsent:   {shlex.join(s.fail_mail_cmd)}"],
                         stdin=subprocess.DEVNULL).returncode
     if rc != 0:
-        err("00078", f"--test-mail: test mail NOT sent [rc {rc}]: {shlex.join(s.fail_mail_cmd)}")
+        err("00079", f"--test-mail: test mail NOT sent [rc {rc}]: {shlex.join(s.fail_mail_cmd)}")
     OUT.msg(f" >>> test mail sent through {shlex.join(s.fail_mail_cmd)} [rc 0]")
     return 0
 
@@ -1882,14 +1912,14 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
         try:
             since = datetime.date.fromisoformat(v)
         except ValueError:
-            err("00079", f"--since '{v}' -- a date, YYYY-MM-DD")
+            err("00080", f"--since '{v}' -- a date, YYYY-MM-DD")
     recs = read_recordings(s)
     if not recs:
-        err("00080", f"no recordings in {s.recordings_file} -- `{SCRIPT_NAME} record ...` adds one")
+        err("00081", f"no recordings in {s.recordings_file} -- `{SCRIPT_NAME} record ...` adds one")
     unknown = [x for x in texts if not any(x in r.line() for r in recs)]
     if unknown:
         names = "', '".join(unknown)
-        err("00081", f"no recording holds '{names}' -- `{SCRIPT_NAME} list` shows them")
+        err("00082", f"no recording holds '{names}' -- `{SCRIPT_NAME} list` shows them")
     chosen = [r for r in recs if not texts or any(x in r.line() for x in texts)]
     if "--background" in args:
         return launch_refresh(s, [a for a in args if a != "--background"])
@@ -1897,7 +1927,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
         today = datetime.date.today()
         failures = st.failures
         st.total = len(chosen)
-        searched = failed_searches = done = 0
+        searched = failed_searches = done = fetched = 0
         known = fetched_before(s)
         phase("looking through the library")
         library = library_slots(s, chosen)
@@ -1948,22 +1978,28 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
             got = run_child([*_child, *child_options(s), "get"], s.get_timeout, rec.folder, "\n".join(names) + "\n")
             note_fetched(s, [n for n in names if here_already(s, n, rec.folder)], known)   # failed or not
             if got is None or got[0] != 0:
+                fetched += sum(1 for n in names if decoded_here(n, rec.folder))
                 why = (f"the get was not done within GET_TIMEOUT={s.get_timeout}s -- killed"
                        if got is None else f"the get failed [rc {got[0]}]")
                 failures.append(f"  {rec.search}: {why} on {len(names)} recording(s)")
                 OUT.warn(f"{rec.search}: {why}")
                 continue
+            fetched += len(names)
             OUT.msg(f" >>> {rec.search}: fetched {len(names)} [{of}, rc 0]")
-        if not texts and not dry and s.run_after_refresh:
+        if not dry and fetched and s.run_after_refresh:
             phase("running RUN_AFTER_REFRESH")
-            try:
-                rc = subprocess.run(list(s.run_after_refresh), stdin=subprocess.DEVNULL).returncode
-            except OSError as e:
-                rc = -1
-                OUT.warn(f"RUN_AFTER_REFRESH: {e.strerror or e}")
-            OUT.msg(f" >>> RUN_AFTER_REFRESH: {shlex.join(s.run_after_refresh)} [rc {rc}]")
-            if rc != 0:
-                failures.append(f"  RUN_AFTER_REFRESH {shlex.join(s.run_after_refresh)} failed [rc {rc}]")
+            for cmd in s.run_after_refresh:
+                try:
+                    rc = subprocess.run(list(cmd), stdin=subprocess.DEVNULL).returncode
+                except OSError as e:
+                    rc = -1
+                    OUT.warn(f"RUN_AFTER_REFRESH: {e.strerror or e}")
+                OUT.msg(f" >>> RUN_AFTER_REFRESH: {shlex.join(cmd)} [rc {rc}]")
+                if rc != 0:
+                    failures.append(f"  RUN_AFTER_REFRESH {shlex.join(cmd)} failed [rc {rc}]")
+                    break
+        elif not dry and s.run_after_refresh:
+            OUT.det("    > nothing new fetched -- RUN_AFTER_REFRESH skipped")
         phase("finishing")
         OUT.msg(f" >>> refresh: done [{done} recording(s), {len(failures)} failed]")
         if failures:
@@ -1972,7 +2008,7 @@ def cmd_refresh(s: Settings, args: Sequence[str]) -> int:
                     if searched > 1 and failed_searches == searched else "")
             text_ = f"{len(failures)} of {done} recording(s) failed:{head}\n" + "\n".join(failures)
             mail_failure(s, text_)
-            err("00082", text_)
+            err("00083", text_)
     return 0
 
 
@@ -1983,7 +2019,7 @@ def launch_refresh(s: Settings, args: Sequence[str]) -> int:
     if lock_dir(s).is_dir():
         owner, held = lock_owner(lock_dir(s))
         if held:
-            err("00083", f"a refresh is running already ({owner}) -- `{SCRIPT_NAME} status` shows how far it got")
+            err("00084", f"a refresh is running already ({owner}) -- `{SCRIPT_NAME} status` shows how far it got")
     out = background_output(s)
     argv = [*_child, *child_options(s), *(["-V"] if OUT.vrb and not OUT.dbg_on else []), "refresh", *args]
     OUT.dbg(f"background: {shlex.join(argv)}  > {out}")
@@ -1993,7 +2029,7 @@ def launch_refresh(s: Settings, args: Sequence[str]) -> int:
             p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
                                  cwd=Path.home(), start_new_session=True)
     except OSError as e:
-        err("00084", f"cannot start the background refresh: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        err("00085", f"cannot start the background refresh: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
     try:
         rc = p.wait(timeout=2)      # a refresh that fails at once (its config, the lock) says so here
     except subprocess.TimeoutExpired:
@@ -2002,7 +2038,7 @@ def launch_refresh(s: Settings, args: Sequence[str]) -> int:
         return 0
     last = (out.read_text(encoding="utf-8", errors="replace").strip().splitlines() or ["no output"])[-1]
     if rc != 0:
-        err("00085", f"the background refresh ended at once [rc {rc}]: {last}")
+        err("00086", f"the background refresh ended at once [rc {rc}]: {last}")
     OUT.msg(f" >>> the background refresh is done already [rc 0] -- its output: {out}")
     return 0
 
@@ -2017,7 +2053,7 @@ def cmd_status(s: Settings) -> int:
         OUT.result(f" >>> refresh: none recorded yet [{p}]")
         return 0
     except OSError as e:
-        err("00086", f"cannot read {p}: {e.strerror}")
+        err("00087", f"cannot read {p}: {e.strerror}")
     try:
         d = cast(Dict[str, object], json.loads(raw))
         pid, at, total = int(cast(int, d["pid"])), int(cast(int, d["at"])), int(cast(int, d["total"]))
@@ -2025,7 +2061,7 @@ def cmd_status(s: Settings) -> int:
         rc = None if d["rc"] is None else int(cast(int, d["rc"]))
         failures = [str(x).strip() for x in cast(List[object], d["failures"])]
     except (ValueError, KeyError, TypeError) as e:
-        err("00087", f"{p}: not a status my-otr wrote ({type(e).__name__}: {e})")
+        err("00088", f"{p}: not a status my-otr wrote ({type(e).__name__}: {e})")
     failed = f"{len(failures)} failed" + (" so far" if not ended else "")
     if ended:
         OUT.result(f" >>> refresh: done {ended} [rc {rc}], {total} recording(s), {failed} -- started {started}")
@@ -2060,7 +2096,7 @@ def cmd_record(s: Settings, args: Sequence[str]) -> int:
         if found is None:
             OUT.warn(f"the search gave no answer within SEARCH_TIMEOUT={s.search_timeout}s -- recorded anyway")
         elif found[0] != 0:
-            err("00088", f"the search failed [rc {found[0]}] -- nothing recorded: {rec.search}")
+            err("00089", f"the search failed [rc {found[0]}] -- nothing recorded: {rec.search}")
         elif found[1]:
             OUT.msg(f" >>> found {len(found[1])} now:")
             for n in found[1]:
@@ -2196,18 +2232,18 @@ _geteuid: Callable[[], int] = os.geteuid
 def check_install(s: Settings) -> None:
     """What --install refuses, before root is even asked for."""
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s.run_at):
-        err("00089", f"RUN_AT=\"{s.run_at}\" -- HH:MM")
+        err("00090", f"RUN_AT=\"{s.run_at}\" -- HH:MM")
     if s.run_at.startswith("02:"):
-        err("00090", f"RUN_AT=\"{s.run_at}\": launchd fires a time between 02:00 and 02:59 twice on the night "
+        err("00091", f"RUN_AT=\"{s.run_at}\": launchd fires a time between 02:00 and 02:59 twice on the night "
                      "the clocks go back -- choose one outside it")
     if not s.run_as:
-        err("00091", "RUN_AS is not set -- who does the nightly refresh run as?")
+        err("00092", "RUN_AS is not set -- who does the nightly refresh run as?")
     try:
         pwd.getpwnam(s.run_as)
     except KeyError:
-        err("00092", f"RUN_AS=\"{s.run_as}\": no such user here")
+        err("00093", f"RUN_AS=\"{s.run_as}\": no such user here")
     if s.fda_launcher and not os.access(s.fda_launcher, os.X_OK):
-        err("00093", f"FDA_LAUNCHER \"{s.fda_launcher}\" is not there, or not executable")
+        err("00094", f"FDA_LAUNCHER \"{s.fda_launcher}\" is not there, or not executable")
 
 
 def cmd_install(s: Settings, remove: bool) -> int:
@@ -2215,11 +2251,11 @@ def cmd_install(s: Settings, remove: bool) -> int:
     if not remove:
         check_install(s)
     if _geteuid() != 0:
-        err("00094", f"needs root -- as root: {SCRIPT_NAME} --{'uninstall' if remove else 'install'}")
+        err("00095", f"needs root -- as root: {SCRIPT_NAME} --{'uninstall' if remove else 'install'}")
     target = f"system/{s.launchd_label}"
     if remove:
         if not p.exists():
-            err("00095", f"--uninstall: {p} is not there -- nothing installed")
+            err("00096", f"--uninstall: {p} is not there -- nothing installed")
         subprocess.run(["launchctl", "bootout", target], stdin=subprocess.DEVNULL)
         p.unlink()
         OUT.msg(f" >>> removed {p} (and the job from launchd)")
@@ -2231,7 +2267,7 @@ def cmd_install(s: Settings, remove: bool) -> int:
     try:
         new.write_text(plist_content(s, program), encoding="utf-8")
         if subprocess.run(["plutil", "-lint", "-s", str(new)]).returncode != 0:
-            err("00096", "--install: the plist written does not lint -- nothing installed")
+            err("00097", "--install: the plist written does not lint -- nothing installed")
         os.chmod(new, 0o644)
         with contextlib.suppress(OSError):
             Path(s.launchd_log).parent.mkdir(parents=True, exist_ok=True)
@@ -2241,7 +2277,7 @@ def cmd_install(s: Settings, remove: bool) -> int:
         with contextlib.suppress(OSError):
             new.unlink()
     if subprocess.run(["launchctl", "bootstrap", "system", str(p)]).returncode != 0:
-        err("00097", f"--install: launchctl bootstrap failed for {p}")
+        err("00098", f"--install: launchctl bootstrap failed for {p}")
     how = f"through {s.fda_launcher} (it drops to its own user)" if s.fda_launcher else f"as {s.run_as}"
     OUT.msg(f" >>> installed {p}: `{SCRIPT_NAME} -Q refresh` daily at {s.run_at}, {how}; its output: {s.launchd_log}")
     return 0
@@ -2309,10 +2345,10 @@ def snitch_check(s: Settings) -> Tuple[List[SnitchRule], List[SnitchRule]]:
         r = subprocess.run([s.little_snitch, "list"], capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=120)
     except (OSError, subprocess.SubprocessError) as e:
-        err("00098", f"{s.little_snitch} list: {e}")
+        err("00099", f"{s.little_snitch} list: {e}")
     if r.returncode != 0:
         last = (r.stderr.strip().splitlines() or ["no message"])[-1]
-        err("00099", f"{s.little_snitch} list [{r.returncode}]: {last}")
+        err("00100", f"{s.little_snitch} list [{r.returncode}]: {last}")
     lines = r.stdout.splitlines()
 
     def there(x: SnitchRule) -> bool:
@@ -2342,11 +2378,11 @@ def snitch_install(s: Settings) -> None:
     for x in missing:
         argv = [s.little_snitch, "allow", "go", "any", x.remote, "--port", str(x.port), "--via", x.via, "--owner", s.run_as]
         if subprocess.run(argv, stdin=subprocess.DEVNULL).returncode != 0:
-            err("00100", f"the Little Snitch rule {x.shown(s.run_as)} was not written")
+            err("00101", f"the Little Snitch rule {x.shown(s.run_as)} was not written")
     if missing:
         rules, still = snitch_check(s)
         if still:
-            err("00101", f"written, but {s.little_snitch} list does not show: {still[0].shown(s.run_as)}")
+            err("00102", f"written, but {s.little_snitch} list does not show: {still[0].shown(s.run_as)}")
         OUT.msg(f" >>> Little Snitch: {len(missing)} rule(s) written, {len(rules) - len(missing)} were in place")
     else:
         OUT.msg(snitch_summary(s, rules, missing) + " -- nothing to write")
@@ -2510,7 +2546,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
                 if a not in COMMANDS:
                     hint = (f" -- you mean `{SCRIPT_NAME} {GONE[a]}`" if a in GONE
                             else f" -- you mean `{SCRIPT_NAME} decode {a}`" if a.lower().endswith((".otrkey", ".otr2")) else "")
-                    err("00102", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
+                    err("00103", f"'{a}' is no command{hint} ({SCRIPT_NAME} --help)")
                 c.command = COMMANDS[a]
             else:
                 c.args.append(a)
@@ -2533,14 +2569,14 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         elif key in ("--log-file", "--config"):
             v = val if eq else next(it, None)
             if not v:
-                err("00103", f"{key} needs a <FILE>")
+                err("00104", f"{key} needs a <FILE>")
             if key == "--config":
                 c.config = v
             else:
                 c.log_file, c.log = v, True
         elif a in ("--dry-run", "--background") or key in ("--max", "--since"):
             if c.command not in ("refresh", "record") or (key == "--since" and c.command != "refresh"):
-                err("00104", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
+                err("00105", f"{key} goes with {'record' if key == '--max' else 'refresh'}")
             c.args.append(a)
             if key in ("--max", "--since") and not eq:
                 c.args.append(next(it, ""))
@@ -2551,7 +2587,7 @@ def parse_cli(argv: Sequence[str]) -> Cli:
         else:
             verb = GONE.get(a, a.lstrip("-"))
             hint = f" -- you mean `{SCRIPT_NAME} {verb}`" if verb in COMMANDS else f" ({SCRIPT_NAME} --help)"
-            err("00105", f"no such option '{a}'{hint}")
+            err("00106", f"no such option '{a}'{hint}")
     return c
 
 
@@ -2565,7 +2601,7 @@ def setup_output(s: Settings, c: Cli, argv: Sequence[str]) -> None:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             OUT.log = logfile.open("a", encoding="utf-8")
         except OSError as e:
-            err("00106", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
+            err("00107", f"cannot write the LOGFILE {logfile}: {e.strerror} (-L runs without one)")
         OUT.record(f"==== {SCRIPT_NAME} {shlex.join(argv)}   [in {Path.cwd()}]")
 
 
@@ -2578,7 +2614,7 @@ def create_config(target: Optional[str]) -> int:
         with p.open("x", encoding="utf-8") as f:
             f.write(DEFAULT_CONFIG)
     except FileExistsError:
-        err("00107", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
+        err("00108", f"{p} exists -- never written over (compare it with `{SCRIPT_NAME} --create-config`)")
     OUT.msg(f" >>> wrote the default config to {p}")
     return 0
 
@@ -2600,7 +2636,7 @@ def run(argv: Sequence[str]) -> int:
         return cmd_state(argv, c.config)
     if c.command == "update-check":
         if len(c.args) != 1:
-            err("00108", "update-check needs the <ZIP> of OTR's decoder")
+            err("00109", "update-check needs the <ZIP> of OTR's decoder")
         return update_check(Path(c.args[0]))
     s = load_settings(c.config)
     setup_output(s, c, argv)
@@ -2622,7 +2658,7 @@ def run(argv: Sequence[str]) -> int:
     if c.command == "decode":
         return cmd_decode(s, c.args, force)
     if c.args:
-        err("00109", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
+        err("00110", f"'{c.command}' takes no arguments -- it reads stdin: {' '.join(c.args)[:60]}")
     if c.command == "login":
         datenkeller_login(s, force)
         return 0
@@ -2649,7 +2685,7 @@ def main(argv: Sequence[str]) -> int:
                   f"a half-written file is removed; run it again to go on")
         return 130
     except OSError as e:
-        OUT.error(f"ERROR 00110 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
+        OUT.error(f"ERROR 00111 [1]: while {_phase}: {e.strerror or e}" + (f": {e.filename}" if e.filename else ""))
         return 1
     except Exception as e:   # a bug: one line here, the trace in a file
         where = trace_file()
@@ -2657,7 +2693,7 @@ def main(argv: Sequence[str]) -> int:
             where.write_text(f"{version_line()}\nargv: {list(argv)}\n\n{traceback.format_exc()}", encoding="utf-8")
         except OSError:
             where = Path("(not written)")
-        OUT.error(f"ERROR 00111 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
+        OUT.error(f"ERROR 00112 [70]: unexpected {type(e).__name__} while {_phase} -- the trace: {where}")
         return 70
     finally:
         if OUT.log is not None:
@@ -2806,24 +2842,24 @@ def t_search_filters(t: T) -> None:
         got = first_letters(*args)
         t.check(got == want, f"{what}: {args} -> {got}")
     rc, _, errs = _t_searched(t, ",", "desc")
-    t.check(rc == 1 and "ERROR 00021" in errs and "the show's general description" in errs,
+    t.check(rc == 1 and "ERROR 00022" in errs and "the show's general description" in errs,
             f"a DESCRIPTION search is refused, saying why, not silently ignored: {errs}")
     rc, _, errs = _t_searched(t, "@2026-10-06", ">2026-10-01")
-    t.check(rc == 1 and "ERROR 00027" in errs, "@DATE with >DATE is refused")
+    t.check(rc == 1 and "ERROR 00028" in errs, "@DATE with >DATE is refused")
 
 
 def t_search_fails_loud(t: T) -> None:
     rc, names, errs = _t_searched(t, answer="<html>Wartungsarbeiten</html>\n")
-    t.check(rc == 1 and "ERROR 00029" in errs and not names, f"an answer that is no list fails: rc {rc}")
+    t.check(rc == 1 and "ERROR 00030" in errs and not names, f"an answer that is no list fails: rc {rc}")
     rc, names, errs = _t_searched(t, answer="")
-    t.check(rc == 1 and "ERROR 00062" in errs, "an empty answer fails")
+    t.check(rc == 1 and "ERROR 00063" in errs, "an empty answer fails")
     t.routes[DK_SITE] = lambda req: Reply(503, b"down")
     rc, out, errs = t.run(["--config", str(t.config()), "-V", "search", "x"])
-    t.check(rc == 1 and "ERROR 00034" in errs and "apikey=***" in errs, f"HTTP 503 fails, the key hidden: {errs}")
+    t.check(rc == 1 and "ERROR 00035" in errs and "apikey=***" in errs, f"HTTP 503 fails, the key hidden: {errs}")
     t.no_secret(out + errs, "a failed search's output")
     t.routes.clear()
     rc, out, errs = t.run(["--config", str(t.config()), "search", "x"])
-    t.check(rc == 1 and "ERROR 00033" in errs and "otr.datenkeller.net: no answer" in errs, f"no network: {errs}")
+    t.check(rc == 1 and "ERROR 00034" in errs and "otr.datenkeller.net: no answer" in errs, f"no network: {errs}")
     t.no_secret(out + errs, "a search without network")
 
 
@@ -2847,7 +2883,7 @@ def t_get_name_forms(t: T) -> None:
             name_of_line(line)
             t.check(False, f"no OTR name, refused: {line}")
         except OtrError as e:
-            t.check(e.code == "00036", e.text)
+            t.check(e.code == "00037", e.text)
 
 
 def _t_get(t: T, names: str, *opts: str) -> Tuple[int, str, str]:
@@ -2907,7 +2943,7 @@ def t_get_duplicates(t: T) -> None:
     _, _, errs = _t_get(t, f"{base}.HQ.otr2\n")
     t.check("1 downloaded" in errs, f"an add-on is no copy; an unfinished one (.aria2 beside it) is resumed: {errs}")
     rc, _, errs = _t_get(t, f"{base}.LQ.otr2\nnonsense\n")
-    t.check(rc == 1 and "ERROR 00036" in errs and "downloaded" not in errs, "a bad line stops get before any download")
+    t.check(rc == 1 and "ERROR 00037" in errs and "downloaded" not in errs, "a bad line stops get before any download")
 
 
 def _t_otr2_file(t: T, name: str, plain: bytes, cek: bytes, size: Optional[int] = None) -> Path:
@@ -2970,7 +3006,7 @@ def t_decode_otr2_wrong_checksum(t: T) -> None:
     src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", plain, cek)
     _t_key_server(t, cek, hashlib.sha256(b"something else").hexdigest())
     rc, _, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
-    t.check(rc == 1 and "ERROR 00059" in errs, f"a checksum mismatch fails: rc {rc}: {errs}")
+    t.check(rc == 1 and "ERROR 00060" in errs, f"a checksum mismatch fails: rc {rc}: {errs}")
     t.check(src.exists(), "the source is kept")
     t.check(sorted(p.name for p in t.dir.iterdir() if "Foo" in p.name) == [src.name], "no decoded file, no .part left")
 
@@ -2980,7 +3016,7 @@ def t_decode_otr2_incomplete(t: T) -> None:
     src = _t_otr2_file(t, "Foo_26.10.04_10-15_zdf_100_TVOON_DE.HQ.otr2", b"x" * 100, cek, size=5000)
     _t_key_server(t, cek, "")
     rc, _, errs = t.run(["--config", str(t.config()), "decode", str(src), str(t.dir)])
-    t.check(rc == 1 and "ERROR 00057" in errs, f"an incomplete .otr2 fails: {errs}")
+    t.check(rc == 1 and "ERROR 00058" in errs, f"an incomplete .otr2 fails: {errs}")
     t.check(not any(u.startswith(OTR_KEYS) for _, u, _ in t.requests), "... before a key is asked for (each one counts)")
 
 
@@ -3115,7 +3151,7 @@ def t_site_conf_gives_the_bases_the_search_and_the_offer(t: T) -> None:
             load_settings(None)
             t.check(False, "without the file, a config in $LINKS/default or $CONFIG_SEARCH_DIR was read")
         except OtrError as e:
-            t.check(e.code == "00015" and str(links) not in e.text and "/etc/my-otr.conf" in e.text,
+            t.check(e.code == "00016" and str(links) not in e.text and "/etc/my-otr.conf" in e.text,
                     f"without the file: no search directory, none offered: {e}")
         farm.mkdir()
         site_file.write_text(f'DATA_BASE_DIR="/srv/data"\nLOG_BASE_DIR="/srv/log"\nCONFIG_SEARCH_DIR="{farm}"\n'
@@ -3194,7 +3230,7 @@ def t_create_config(t: T) -> None:
     rc, _, errs = t.run(["--create-config", str(p)])
     t.check(rc == 0 and p.read_text() == DEFAULT_CONFIG, f"... or writes them: {errs}")
     rc, _, errs = t.run([f"--create-config={p}"])
-    t.check(rc == 1 and "ERROR 00107" in errs, "never over an existing file")
+    t.check(rc == 1 and "ERROR 00108" in errs, "never over an existing file")
     (t.dir / "site.conf").write_text(f'LOG_BASE_DIR="{t.dir}/log"\n')
     rc, _, errs = t.run(["--config", str(p), "search", "x"])
     t.check(rc == 1 and "ERROR 00002" in errs and "DATENKELLER_APIKEY" in errs and "WARNING" not in errs,
@@ -3303,7 +3339,7 @@ def t_bug_trace(t: T) -> None:
     t.routes[DK_SITE] = boom
     rc, _, errs = t.run(["--config", str(t.config()), "search", "x"])
     m = re.search(r"the trace: (\S+)", errs)
-    t.check(rc == 70 and "ERROR 00111 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
+    t.check(rc == 70 and "ERROR 00112 [70]: unexpected ZeroDivisionError" in errs and "Traceback" not in errs, errs)
     t.check(m is not None and "Traceback" in Path(m.group(1)).read_text(), "the trace is in the file")
     if m:
         Path(m.group(1)).unlink()
@@ -3467,16 +3503,76 @@ def t_refresh(t: T) -> None:
     (calls).unlink()
     rc, _, errs = t.run(["--config", str(conf), "refresh", "delta"])
     t.check(rc == 0 and len([c for c in _t_lines(calls) if c.startswith("search")]) == 1, f"refresh <TEXT>: {errs}")
-    t.check(_t_lines(t.dir / "after.ran") == ["ran"], "RUN_AFTER_REFRESH not after a single recording")
+    t.check(_t_lines(t.dir / "after.ran") == ["ran", "ran"], "RUN_AFTER_REFRESH also after a scoped refresh that fetched")
+    calls.unlink()
+    rc, _, errs = t.run(["--config", str(conf), "refresh", "beta"])
+    t.check(rc == 0 and _t_lines(t.dir / "after.ran") == ["ran", "ran"], "RUN_AFTER_REFRESH skipped when 0 fetched")
     calls.unlink()
     rc, _, errs = t.run(["--config", str(conf), "refresh", "alpha", "--dry-run"])
     t.check(rc == 0 and "would fetch 2" in errs and not any(c.startswith("get") for c in _t_lines(calls)), errs)
+    t.check(_t_lines(t.dir / "after.ran") == ["ran", "ran"], "RUN_AFTER_REFRESH skipped on --dry-run")
     calls.unlink()
     rc, _, errs = t.run(["--config", str(conf), "refresh", "delta", "beta", "--dry-run"])
     searched = [c.split(" @")[0] for c in _t_lines(calls) if c.startswith("search")]
     t.check(rc == 0 and searched == ["search beta zero", "search delta one"], f"several TEXTs: the lines holding one: {searched}")
     rc, _, errs = t.run(["--config", str(conf), "refresh", "delta", "nope", "--dry-run"])
     t.check(rc == 1 and "no recording holds 'nope'" in errs, f"a TEXT no line holds is refused, not skipped: {errs}")
+
+
+def t_run_after_refresh(t: T) -> None:
+    """RUN_AFTER_REFRESH: skipped when 0 fetched or only undecoded .otr2 left,
+    runs on partial failure when a decoded file arrived, and chains && without a shell."""
+    global _child
+    _t_child(t)
+    for bad in ("&& echo x", "echo x &&", "echo x && && echo y"):
+        rc, _, errs = t.run(["--config", str(_t_rec_config(t, "", f'RUN_AFTER_REFRESH="{bad}"\n')), "list"])
+        t.check(rc == 1 and "ERROR 00014" in errs, f"{bad!r}: refused: {errs}")
+    # all here already -> 0 fetched -> skipped
+    (t.dir / "lib" / "d").mkdir(parents=True)
+    (t.dir / "lib" / "d" / "delta_one_0_26.10.01_20-15_zdf_45_TVOON_DE.HQ.mp4").write_bytes(b"x")
+    conf = _t_rec_config(t, "record d/ 'delta one'\n")
+    rc, _, errs = t.run(["--config", str(conf), "-V", "refresh"])
+    t.check(rc == 0 and _t_lines(t.dir / "after.ran") == [] and "nothing new fetched -- RUN_AFTER_REFRESH skipped" in errs,
+            f"0 fetched skips RUN_AFTER_REFRESH: {errs}")
+    (t.dir / "lib" / "d" / "delta_one_0_26.10.01_20-15_zdf_45_TVOON_DE.HQ.mp4").unlink()
+    (t.dir / "rec.fetched").unlink()
+    # && chain: both run in order; first failing stops the second
+    log = t.dir / "chain.log"
+    (t.dir / "s1").write_text(f"#!/bin/sh\necho \"s1:$1\" >> '{log}'\nexit \"${{FAIL_S1:-0}}\"\n")
+    (t.dir / "s2").write_text(f"#!/bin/sh\necho \"s2:$1\" >> '{log}'\n")
+    (t.dir / "s1").chmod(0o755)
+    (t.dir / "s2").chmod(0o755)
+    conf = _t_rec_config(t, "record b/ 'beta one'\n", f'RUN_AFTER_REFRESH="{t.dir}/s1 ok && {t.dir}/s2 done"\n')
+    rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    t.check(rc == 0 and _t_lines(log) == ["s1:ok", "s2:done"], f"&& runs both in order: {_t_lines(log)} {errs}")
+    log.unlink()
+    with _t_environ(FAIL_S1="2"):
+        rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    t.check(rc == 1 and _t_lines(log) == ["s1:ok"] and "failed [rc 2]" in errs,
+            f"first failing stops the chain and fails refresh: {_t_lines(log)} {errs}")
+    # partial get failure: decoded .mp4 triggers, undecoded .otr2 alone does not
+    stub = t.dir / "partial.py"
+    stub.write_text(
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "verb = next((a for a in args if a in ('search', 'get')), '')\n"
+        "if verb == 'search':\n"
+        "    print('alpha_three_0_26.10.01_20-15_zdf_45_TVOON_DE.HQ.otr2')\n"
+        "elif verb == 'get':\n"
+        "    sys.stdin.read()\n"
+        "    ext = os.environ.get('PARTIAL_EXT', 'mp4')\n"
+        "    open(f'alpha_three_0_26.10.01_20-15_zdf_45_TVOON_DE.HQ.{ext}', 'w').close()\n"
+        "    sys.exit(1)\n", encoding="utf-8")
+    _child = [sys.executable, str(stub)]
+    conf = _t_rec_config(t, "record a/ 'alpha three'\n")
+    with _t_environ(PARTIAL_EXT="otr2"):
+        rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    t.check(rc == 1 and _t_lines(t.dir / "after.ran") == [], f"undecoded .otr2 alone does not trigger: {errs}")
+    (t.dir / "lib" / "a" / "alpha_three_0_26.10.01_20-15_zdf_45_TVOON_DE.HQ.otr2").unlink()
+    (t.dir / "rec.fetched").unlink()
+    with _t_environ(PARTIAL_EXT="mp4"):
+        rc, _, errs = t.run(["--config", str(conf), "refresh"])
+    t.check(rc == 1 and _t_lines(t.dir / "after.ran") == ["ran"], f"decoded .mp4 on partial get failure triggers: {errs}")
 
 
 def t_refresh_here(t: T) -> None:
@@ -3611,7 +3707,7 @@ def t_refresh_status(t: T) -> None:
             and "refreshing 'alpha peek one'" in peek, f"while it runs: at 1 of 2, what it does now: {peek}")
     rc, out, _ = t.run(["--config", str(conf), "status"])
     t.check(rc == 0 and " [rc 1], 2 recording(s), 1 failed -- started " in out
-            and "    > ERROR 00082: 1 of 2 recording(s) failed:" in out
+            and "    > ERROR 00083: 1 of 2 recording(s) failed:" in out
             and "    > failed: 'beta broken': the search failed [rc 3]" in out, f"done, its rc, what failed: {out}")
     st = t.dir / "rec.status"
     d = json.loads(st.read_text())
@@ -3792,7 +3888,7 @@ TESTS: Final[List[Callable[[T], None]]] = [
     t_site_conf_gives_the_bases_the_search_and_the_offer, t_site_conf_there_but_unreadable_is_an_error,
     t_config_offer_names_only_searched_paths,
     t_create_config, t_output_layers, t_ctrl_c, t_bootstrap, t_venv_only_to_decode, t_bug_trace, t_update_check, t_version,
-    t_relative_date, t_record_lines, t_record_adds, t_refresh, t_refresh_here, t_refresh_fetched, t_refresh_library, t_refresh_since, t_refresh_timeout, t_refresh_all_failed,
+    t_relative_date, t_record_lines, t_record_adds, t_refresh, t_run_after_refresh, t_refresh_here, t_refresh_fetched, t_refresh_library, t_refresh_since, t_refresh_timeout, t_refresh_all_failed,
     t_refresh_outdated, t_refresh_lock, t_refresh_status, t_refresh_background, t_state, t_install, t_install_snitch, t_test_mail,
 ]
 
